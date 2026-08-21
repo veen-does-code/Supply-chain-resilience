@@ -129,3 +129,10 @@ print("\nAvgTone statistics:")
 print(
     iran_events["AvgTone"].describe()
 )
+
+iran_events.to_csv(
+    "iran_events.csv",
+    index=False
+)
+
+print("\nSaved as: iran_events.csv")
