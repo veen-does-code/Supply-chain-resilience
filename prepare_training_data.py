@@ -1,24 +1,15 @@
 import pandas as pd
 
-# ==========================================
-# PREPARE TRAINING DATA
-# ==========================================
-
 print("Loading historical event data...")
+
+# -----------------------------------------
+# LOAD HISTORICAL DATA
+# -----------------------------------------
 
 df = pd.read_csv("historical_events.csv")
 
-# Convert date column
+# Convert date to datetime
 df["date"] = pd.to_datetime(df["date"])
-
-# ------------------------------------------------
-# 1. Keep only the recent 2026 data
-# ------------------------------------------------
-
-df = df[
-    (df["date"] >= "2026-07-02") &
-    (df["date"] <= "2026-08-20")
-].copy()
 
 # Sort chronologically
 df = df.sort_values("date").reset_index(drop=True)
@@ -26,81 +17,103 @@ df = df.sort_values("date").reset_index(drop=True)
 print(f"Days available: {len(df)}")
 
 
-# ------------------------------------------------
-# 2. Calculate current GDELT risk score
-# ------------------------------------------------
-#
+# -----------------------------------------
+# CALCULATE RISK SCORE
+# -----------------------------------------
+
 # Goldstein:
 # -10 = highest risk
 # +10 = lowest risk
-#
+goldstein_risk = (10 - df["avg_goldstein"]) / 20
+
 # AvgTone:
-# negative = more negative tone
-#
-# We normalize both to 0-1 risk.
-# ------------------------------------------------
-
-df["goldstein_risk"] = (10 - df["avg_goldstein"]) / 20
-
-# Clip AvgTone because GDELT tone can go beyond +/-10
+# Clip to -10 to +10
+# -10 = highest risk
+# +10 = lowest risk
 tone_clipped = df["avg_tone"].clip(-10, 10)
 
-df["tone_risk"] = (10 - tone_clipped) / 20
+tone_risk = (10 - tone_clipped) / 20
 
-# 60% Goldstein + 40% tone
+# Combine the two signals
 df["risk_score"] = (
-    0.6 * df["goldstein_risk"] +
-    0.4 * df["tone_risk"]
+    0.6 * goldstein_risk +
+    0.4 * tone_risk
 ) * 100
 
 
-# ------------------------------------------------
-# 3. Create trend features
-# ------------------------------------------------
+# -----------------------------------------
+# CALCULATE CHANGES FROM PREVIOUS DAY
+# -----------------------------------------
 
-df["goldstein_change"] = df["avg_goldstein"].diff()
+df["goldstein_change"] = (
+    df["avg_goldstein"].diff()
+)
 
-df["tone_change"] = df["avg_tone"].diff()
+df["tone_change"] = (
+    df["avg_tone"].diff()
+)
 
-df["event_count_change"] = df["event_count"].diff()
+df["event_count_change"] = (
+    df["event_count"].diff()
+)
 
-df["risk_change"] = df["risk_score"].diff()
+df["risk_change"] = (
+    df["risk_score"].diff()
+)
 
 
-# ------------------------------------------------
-# 4. Create prediction target
-# ------------------------------------------------
+# -----------------------------------------
+# CREATE TOMORROW'S RISK TARGET
+# -----------------------------------------
+
+# The target for today's row is tomorrow's risk score.
 #
-# 1 = tomorrow's risk is higher
-# 0 = tomorrow's risk is not higher
-# ------------------------------------------------
+# Example:
+#
+# Aug 17 → today's risk = 55.75
+#          tomorrow_risk = Aug 18 risk = 57.01
+#
+# Aug 18 → today's risk = 57.01
+#          tomorrow_risk = Aug 19 risk = 58.12
+
+df["tomorrow_risk"] = (
+    df["risk_score"].shift(-1)
+)
+
+
+# -----------------------------------------
+# KEEP THE OLD CLASSIFICATION TARGET
+# -----------------------------------------
+
+# This is still useful later if we want to compare
+# regression against classification.
 
 df["risk_increase_tomorrow"] = (
-    df["risk_score"].shift(-1) > df["risk_score"]
+    df["tomorrow_risk"] > df["risk_score"]
 ).astype(int)
 
 
-# ------------------------------------------------
-# 5. Remove rows where features are unavailable
-# ------------------------------------------------
+# -----------------------------------------
+# REMOVE ROWS THAT CANNOT BE USED
+# -----------------------------------------
 
-df = df.dropna().reset_index(drop=True)
+# The final day has no "tomorrow" data,
+# so it cannot be used for training.
+
+df = df.dropna(
+    subset=[
+        "tomorrow_risk",
+        "goldstein_change",
+        "tone_change",
+        "event_count_change",
+        "risk_change"
+    ]
+).reset_index(drop=True)
 
 
-# ------------------------------------------------
-# 6. Remove final row
-# ------------------------------------------------
-#
-# The final available day doesn't actually have
-# tomorrow's data, so its target isn't meaningful.
-# ------------------------------------------------
-
-df = df.iloc[:-1].copy()
-
-
-# ------------------------------------------------
-# 7. Select useful columns
-# ------------------------------------------------
+# -----------------------------------------
+# SELECT TRAINING DATA COLUMNS
+# -----------------------------------------
 
 training_columns = [
     "date",
@@ -113,57 +126,91 @@ training_columns = [
     "tone_change",
     "event_count_change",
     "risk_change",
+    "tomorrow_risk",
     "risk_increase_tomorrow"
 ]
 
-training_df = df[training_columns]
+training_data = df[training_columns]
 
 
-# ------------------------------------------------
-# 8. Display results
-# ------------------------------------------------
+# -----------------------------------------
+# DISPLAY RESULTS
+# -----------------------------------------
 
-print("\n==========================================")
+print()
+print("==========================================")
 print("       TRAINING DATA")
 print("==========================================")
 
-print(training_df.to_string(index=False))
+print(
+    training_data.to_string(index=False)
+)
 
-print("\n------------------------------------------")
-print("Target distribution:")
+
+# -----------------------------------------
+# TARGET DISTRIBUTION
+# -----------------------------------------
+
+print()
+print("------------------------------------------")
+print("Risk increase target distribution:")
 print("------------------------------------------")
 
 print(
-    training_df["risk_increase_tomorrow"]
+    training_data["risk_increase_tomorrow"]
     .value_counts()
-    .sort_index()
 )
 
-print("\n------------------------------------------")
-print("Target percentages:")
+
+print()
+print("------------------------------------------")
+print("Risk increase percentages:")
 print("------------------------------------------")
 
 print(
-    training_df["risk_increase_tomorrow"]
+    training_data["risk_increase_tomorrow"]
     .value_counts(normalize=True)
-    .sort_index() * 100
+    .mul(100)
 )
 
-print("\n------------------------------------------")
+
+# -----------------------------------------
+# TOMORROW RISK STATISTICS
+# -----------------------------------------
+
+print()
+print("------------------------------------------")
+print("Tomorrow risk statistics:")
+print("------------------------------------------")
+
+print(
+    training_data["tomorrow_risk"].describe()
+)
+
+
+# -----------------------------------------
+# MISSING VALUES
+# -----------------------------------------
+
+print()
+print("------------------------------------------")
 print("Missing values:")
 print("------------------------------------------")
 
-print(training_df.isnull().sum())
+print(
+    training_data.isnull().sum()
+)
 
 
-# ------------------------------------------------
-# 9. Save
-# ------------------------------------------------
+# -----------------------------------------
+# SAVE TRAINING DATA
+# -----------------------------------------
 
-training_df.to_csv(
+training_data.to_csv(
     "training_data.csv",
     index=False
 )
 
-print("\nSaved:")
+print()
+print("Saved:")
 print("training_data.csv")
