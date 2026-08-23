@@ -156,14 +156,17 @@ def main() -> None:
                 "Risk score": route_score,
                 "Category": category,
                 "Δ vs current": 0.0,
+                "Coverage": f"{len(successful)}/{len(route)}",
                 "_current": True,
             }]
+            coverage_notes = {start: result["excluded"]}
             with st.spinner("Scoring alternative sourcing origins..."):
                 for origin in candidates:
                     alt_route = route_for(origin, end)
                     if not alt_route:
                         continue
                     alt_result = score_route(alt_route, all_events, event_status, st.session_state.refresh_nonce, offline)
+                    coverage_notes[origin] = alt_result["excluded"]
                     if alt_result["score"] is None:
                         continue
                     rows.append({
@@ -172,6 +175,7 @@ def main() -> None:
                         "Risk score": alt_result["score"],
                         "Category": alt_result["category"],
                         "Δ vs current": alt_result["score"] - route_score,
+                        "Coverage": f"{len(alt_result['successful'])}/{len(alt_route)}",
                         "_current": False,
                     })
 
@@ -183,8 +187,17 @@ def main() -> None:
                 column_config={
                     "Risk score": st.column_config.NumberColumn(format="%.2f"),
                     "Δ vs current": st.column_config.NumberColumn(format="%+.2f"),
+                    "Coverage": st.column_config.TextColumn("Coverage", help="Usable chokepoints / total chokepoints modeled on that route. Matching scores usually mean matching coverage — check here before assuming a tie is a bug."),
                 },
             )
+
+            if any(len(notes) > 0 for notes in coverage_notes.values()):
+                with st.expander("Why coverage isn't full for every origin"):
+                    for origin, notes in coverage_notes.items():
+                        if notes:
+                            st.caption(f"{origin}: " + " • ".join(notes))
+                        else:
+                            st.caption(f"{origin}: all modeled chokepoints had usable data.")
 
             best = ranking.iloc[0]
             if not bool(best["_current"]) and best["Risk score"] < route_score - 0.01:

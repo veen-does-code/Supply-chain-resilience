@@ -337,23 +337,42 @@ def _article_query(chokepoint: Chokepoint) -> str:
     return f"({places}) (oil OR crude OR tanker OR shipping OR energy OR port OR blockade OR sanctions) sourcelang:english"
 
 
-def _fetch_live_articles(chokepoint: Chokepoint) -> pd.DataFrame:
-    session = _session()
-    response = _request(session, DOC_API_URL, params={"query": _article_query(chokepoint), "mode": "artlist", "format": "json", "maxrecords": 75, "timespan": "24h", "sort": "datedesc"})
+ARTICLE_TIMESPAN_LADDER = ("24h", "3d", "7d", "1m")
+
+
+def _fetch_articles_for_timespan(session: requests.Session, chokepoint: Chokepoint, timespan: str) -> pd.DataFrame:
+    response = _request(session, DOC_API_URL, params={"query": _article_query(chokepoint), "mode": "artlist", "format": "json", "maxrecords": 75, "timespan": timespan, "sort": "datedesc"})
     response.raise_for_status()
     try:
-        articles = pd.DataFrame(response.json().get("articles", []))
+        return pd.DataFrame(response.json().get("articles", []))
     except ValueError as exc:
         LOGGER.exception("GDELT DOC returned non-JSON")
         raise LiveDataError("GDELT article data could not be read.") from exc
-    if articles.empty or "title" not in articles:
-        return pd.DataFrame(columns=ARTICLE_COLUMNS)
-    scores = articles["title"].fillna("").map(lambda title: SentimentIntensityAnalyzer().polarity_scores(title)["compound"])
-    articles["sentiment_score"] = scores
-    normalised = _normalise_article_frame(articles)
-    if normalised is None:
-        raise LiveDataError("Live GDELT article data did not match the expected format.")
-    return normalised
+
+
+def _fetch_live_articles(chokepoint: Chokepoint) -> tuple[pd.DataFrame, str]:
+    """Search a widening time window until real articles are found.
+
+    Many chokepoints genuinely have no matching English-language coverage in
+    a rolling 24-hour window on a given day -- that's thin data, not a
+    broken fetch. Rather than giving up after one narrow attempt, this
+    escalates through longer windows (see ARTICLE_TIMESPAN_LADDER) and
+    reports which window actually produced results, so a quiet news day is
+    distinguishable from an actual failure.
+    """
+    session = _session()
+    widest_window = ARTICLE_TIMESPAN_LADDER[-1]
+    for timespan in ARTICLE_TIMESPAN_LADDER:
+        articles = _fetch_articles_for_timespan(session, chokepoint, timespan)
+        if articles.empty or "title" not in articles:
+            continue
+        scores = articles["title"].fillna("").map(lambda title: SentimentIntensityAnalyzer().polarity_scores(title)["compound"])
+        articles["sentiment_score"] = scores
+        normalised = _normalise_article_frame(articles)
+        if normalised is None:
+            raise LiveDataError("Live GDELT article data did not match the expected format.")
+        return normalised, timespan
+    return pd.DataFrame(columns=ARTICLE_COLUMNS), widest_window
 
 
 def _article_cache_name(chokepoint: Chokepoint) -> str:
@@ -394,14 +413,23 @@ def _legacy_article_snapshot(chokepoint: Chokepoint) -> tuple[pd.DataFrame, dict
 
 
 def load_articles(chokepoint: Chokepoint, force_offline: bool = False) -> tuple[pd.DataFrame, dict[str, str]]:
-    """Return live articles, with per-chokepoint cache and local fallback."""
+    """Return live articles, with per-chokepoint cache and local fallback.
+
+    A live fetch that genuinely finds nothing (even at the widest search
+    window) is NOT cached -- writing an empty result would silently destroy
+    a previously-good cache the next time this chokepoint has a quiet news
+    day. In that case we fall through to cache/legacy exactly as if the
+    fetch had failed outright.
+    """
     if not force_offline:
         try:
-            articles = _fetch_live_articles(chokepoint)
-            articles.to_csv(_cache_path(_article_cache_name(chokepoint)), index=False)
-            metadata = _status("live", _now(), "Live GDELT article data loaded.")
-            _write_metadata(f"articles_{chokepoint.key}.json", **{k: v for k, v in metadata.items() if k != "scope"})
-            return articles, metadata
+            articles, window = _fetch_live_articles(chokepoint)
+            if not articles.empty:
+                articles.to_csv(_cache_path(_article_cache_name(chokepoint)), index=False)
+                metadata = _status("live", _now(), f"Live GDELT article data loaded ({window} window).")
+                _write_metadata(f"articles_{chokepoint.key}.json", **{k: v for k, v in metadata.items() if k != "scope"})
+                return articles, metadata
+            LOGGER.info("No live articles found for %s even at the widest search window (%s); trying fallback.", chokepoint.key, window)
         except (requests.RequestException, LiveDataError):
             LOGGER.exception("Live article fetch failed for %s; attempting fallback", chokepoint.key)
     cached = _load_article_cache(chokepoint)
