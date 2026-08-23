@@ -8,13 +8,38 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+<<<<<<< HEAD
 from live_gdelt import LiveDataError, load_event_data
 from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT
 from route_scoring import score_route
 from routes import REGIONS, alternative_origins, route_for
+=======
+from live_gdelt import LiveDataError, filter_events, load_articles, load_event_data
+from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT, calculate_current_risk, risk_category
+from routes import CHOKEPOINTS, REGIONS, route_for, valid_destinations
+>>>>>>> 5846824e413d4d903386ab94377a94904781a7aa
 
 
 st.set_page_config(page_title="Energy Route Risk", page_icon="⚡", layout="wide")
+
+def apply_custom_css():
+    st.markdown("""
+        <style>
+        .block-container {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        [data-testid="stMetricValue"] {
+            font-size: 2.2rem;
+            font-weight: 700;
+        }
+        [data-testid="stMetricLabel"] {
+            font-size: 1.1rem;
+            color: #6c757d;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -53,7 +78,8 @@ def route_path_label(start: str, route: list, end: str) -> str:
 
 
 def main() -> None:
-    st.title("Energy Supply Route Risk Monitor")
+    apply_custom_css()
+    st.title("⚡ Energy Supply Route Risk Monitor")
     st.caption("Current GDELT signals for modeled energy-shipping chokepoints — not a forecast.")
 
     if "refresh_nonce" not in st.session_state:
@@ -62,7 +88,11 @@ def main() -> None:
     with st.sidebar:
         st.header("Route selection")
         start = st.selectbox("Start region", REGIONS, index=0)
-        end_choices = [region for region in REGIONS if region != start]
+        
+        # Filter end regions to only show valid destinations for the chosen start region
+        valid_ends = valid_destinations(start)
+        end_choices = valid_ends if valid_ends else [region for region in REGIONS if region != start]
+        
         end = st.selectbox("End region", end_choices, index=end_choices.index("Europe") if "Europe" in end_choices else 0)
         offline = st.toggle("Use offline/cached data", help="Skip live requests and use the latest saved data available on this device.")
         if st.button("Refresh live data", type="primary", disabled=offline):
@@ -136,7 +166,14 @@ def main() -> None:
             {"Chokepoint": item["chokepoint"].name, "Risk score": item["score"]["composite_score"], "Category": item["score"]["category"], "Event risk (60%)": item["score"]["event_score"], "VADER risk (40%)": item["score"]["sentiment_score"], "Events": len(item["events"]), "Articles": len(item["articles"])}
             for item in successful
         ])
-        st.dataframe(breakdown, use_container_width=True, hide_index=True, column_config={"Risk score": st.column_config.NumberColumn(format="%.2f"), "Event risk (60%)": st.column_config.NumberColumn(format="%.2f"), "VADER risk (40%)": st.column_config.NumberColumn(format="%.2f")})
+        styled_breakdown = breakdown.style.background_gradient(
+            cmap="RdYlGn_r", subset=["Risk score", "Event risk (60%)", "VADER risk (40%)"], vmin=0, vmax=100
+        ).format({
+            "Risk score": "{:.2f}",
+            "Event risk (60%)": "{:.2f}",
+            "VADER risk (40%)": "{:.2f}"
+        })
+        st.dataframe(styled_breakdown, width="stretch", hide_index=True)
 
     with orchestrator_tab:
         st.subheader("Adaptive Procurement Orchestrator")
@@ -203,18 +240,21 @@ def main() -> None:
         st.subheader("Source articles used in the score")
         articles = pd.concat([item["articles"].assign(chokepoint=item["chokepoint"].name) for item in successful], ignore_index=True)
         articles["seendate"] = pd.to_datetime(articles["seendate"], errors="coerce")
-        st.dataframe(articles[["chokepoint", "seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False), use_container_width=True, hide_index=True, column_config={"url": st.column_config.LinkColumn("Source link", display_text="Open article"), "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f")})
+        st.dataframe(articles[["chokepoint", "seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False), width="stretch", hide_index=True, column_config={"url": st.column_config.LinkColumn("Source link", display_text="Open article"), "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f")})
 
     with trend_tab:
         trend_history = record_live_observation(route_label, route_score, event_status["fetched_at"])
         st.subheader("Live route-risk observations")
         if len(trend_history) == 1:
             st.caption("First observation for this route in this browser session. Refresh live data to add a comparable observation.")
-        trend = px.line(trend_history, x="fetched_at", y="risk_score", markers=True, labels={"fetched_at": "Snapshot time", "risk_score": "Route risk (0–100)"})
+            trend = px.scatter(trend_history, x="fetched_at", y="risk_score", labels={"fetched_at": "Snapshot time", "risk_score": "Route risk (0–100)"})
+            trend.update_traces(marker=dict(size=10))
+        else:
+            trend = px.line(trend_history, x="fetched_at", y="risk_score", markers=True, labels={"fetched_at": "Snapshot time", "risk_score": "Route risk (0–100)"})
         trend.add_hline(y=25, line_dash="dot", line_color="#999999", annotation_text="Medium")
         trend.add_hline(y=50, line_dash="dot", line_color="#999999", annotation_text="High")
         trend.update_layout(yaxis_range=[0, 100], margin=dict(l=10, r=10, t=20, b=10), showlegend=False)
-        st.plotly_chart(trend, use_container_width=True)
+        st.plotly_chart(trend, width="stretch")
 
     with method_tab:
         st.subheader("Score method")
@@ -222,7 +262,7 @@ def main() -> None:
         st.write("The Procurement Orchestrator tab reuses this exact scoring for every alternative origin — it is the same calculation applied to a different modeled route, not a separate model.")
         with st.expander("Experimental ML result — not deployed"):
             st.write("We tested whether historical patterns could predict next-day risk. They did not outperform simple baselines, so prediction is not used in this dashboard.")
-            st.dataframe(pd.DataFrame({"Experiment": ["Risk-direction classification", "Next-day risk regression"], "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"], "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"], "Live use": ["Not deployed", "Not deployed"]}), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame({"Experiment": ["Risk-direction classification", "Next-day risk regression"], "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"], "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"], "Live use": ["Not deployed", "Not deployed"]}), width="stretch", hide_index=True)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,9 @@
 {
+<<<<<<< HEAD
   "fetched_at": "2026-08-23T17:08:36.550279+00:00",
   "export_url": "https://data.gdeltproject.org/gdeltv2/20260823171500.export.CSV.zip"
+=======
+  "fetched_at": "2026-08-23T16:28:52.647217+00:00",
+  "export_url": "https://data.gdeltproject.org/gdeltv2/20260823163000.export.CSV.zip"
+>>>>>>> 5846824e413d4d903386ab94377a94904781a7aa
 }
