@@ -348,8 +348,7 @@ def _fetch_live_articles(chokepoint: Chokepoint) -> pd.DataFrame:
         raise LiveDataError("GDELT article data could not be read.") from exc
     if articles.empty or "title" not in articles:
         return pd.DataFrame(columns=ARTICLE_COLUMNS)
-    analyzer = SentimentIntensityAnalyzer()
-    scores = articles["title"].fillna("").map(lambda title: analyzer.polarity_scores(title)["compound"])
+    scores = articles["title"].fillna("").map(lambda title: SentimentIntensityAnalyzer().polarity_scores(title)["compound"])
     articles["sentiment_score"] = scores
     normalised = _normalise_article_frame(articles)
     if normalised is None:
