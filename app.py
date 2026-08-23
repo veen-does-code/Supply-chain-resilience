@@ -1,158 +1,172 @@
-"""Streamlit dashboard for current Iran / Strait of Hormuz supply-chain risk."""
+"""Route-based, current-risk dashboard using live GDELT data."""
 
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import datetime, timezone
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from data_loader import DataValidationError, load_dashboard_data
-from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT, calculate_current_risk, calculate_historical_risk
+from live_gdelt import LiveDataError, filter_events, load_articles, load_event_data
+from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT, calculate_current_risk, risk_category
+from routes import CHOKEPOINTS, REGIONS, route_for
 
 
-st.set_page_config(page_title="India Energy Supply Risk", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Energy Route Risk", page_icon="⚡", layout="wide")
 
 
-@st.cache_data(show_spinner=False)
-def load_data(directory: str) -> dict[str, pd.DataFrame]:
-    return load_dashboard_data(Path(directory))
+@st.cache_data(ttl=300, show_spinner=False)
+def load_latest_events(refresh_nonce: int, offline: bool) -> tuple[pd.DataFrame, dict[str, str]]:
+    return load_event_data(force_offline=offline)
 
 
-def score_colour(category: str) -> str:
-    return {"LOW": "#1f8a5b", "MEDIUM": "#d98000", "HIGH": "#c74343"}[category]
+@st.cache_data(ttl=300, show_spinner=False)
+def load_route_articles(chokepoint_key: str, refresh_nonce: int, offline: bool) -> tuple[pd.DataFrame, dict[str, str]]:
+    return load_articles(CHOKEPOINTS[chokepoint_key], force_offline=offline)
 
 
-def explanation(score: dict, events: pd.DataFrame, articles: pd.DataFrame) -> str:
-    avg_goldstein = pd.to_numeric(events["GoldsteinScale"], errors="coerce").mean()
-    avg_tone = pd.to_numeric(events["AvgTone"], errors="coerce").mean()
-    negative_share = (articles["sentiment"].astype(str).str.lower() == "negative").mean()
-    goldstein_phrase = "conflict-oriented" if avg_goldstein < 0 else "less conflict-oriented"
-    tone_phrase = "negative" if avg_tone < 0 else "non-negative"
-    return (
-        f"Current risk is {score['category']} at {score['composite_score']:.2f}/100. "
-        f"The event signal contributes {score['event_score']:.2f}/100 and VADER article sentiment contributes "
-        f"{score['sentiment_score']:.2f}/100. Across {len(events):,} Iran-related GDELT events, the average "
-        f"Goldstein score is {avg_goldstein:.2f} ({goldstein_phrase}) and average media tone is {avg_tone:.2f} "
-        f"({tone_phrase}); {negative_share:.0%} of the {len(articles)} source articles are labelled negative."
-    )
+def friendly_time(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except (TypeError, ValueError):
+        return "an unknown time"
+
+
+def record_live_observation(route_label: str, score: float, timestamp: str) -> pd.DataFrame:
+    """Keep a route-aware trend only for distinct data snapshots in this session."""
+    history = st.session_state.setdefault("live_route_history", [])
+    key = f"{route_label}|{timestamp}"
+    if not any(item["key"] == key for item in history):
+        history.append({"key": key, "route": route_label, "fetched_at": timestamp, "risk_score": score})
+    return pd.DataFrame([item for item in history if item["route"] == route_label])
+
+
+def risk_status(category: str) -> None:
+    message = f"Risk level: {category}"
+    if category == "HIGH":
+        st.error(message)
+    elif category == "MEDIUM":
+        st.warning(message)
+    else:
+        st.success(message)
 
 
 def main() -> None:
-    st.title("India Energy Supply Chain Risk Monitor")
-    st.caption("Current Iran / Strait of Hormuz disruption context • Interpretable 60/40 composite • Not a forecast")
+    st.title("Energy Supply Route Risk Monitor")
+    st.caption("Current GDELT signals for modeled energy-shipping chokepoints — not a forecast.")
+
+    if "refresh_nonce" not in st.session_state:
+        st.session_state.refresh_nonce = 0
 
     with st.sidebar:
-        st.header("Data")
-        default_directory = str(Path(__file__).resolve().parent)
-        data_directory = st.text_input("Folder containing the CSV files", value=default_directory)
-        st.caption("The dashboard only reads local CSVs; it does not fetch live GDELT data.")
+        st.header("Route selection")
+        start = st.selectbox("Start region", REGIONS, index=0)
+        end_choices = [region for region in REGIONS if region != start]
+        end = st.selectbox("End region", end_choices, index=end_choices.index("Europe") if "Europe" in end_choices else 0)
+        offline = st.toggle("Use offline/cached data", help="Skip live requests and use the latest saved data available on this device.")
+        if st.button("Refresh live data", type="primary", disabled=offline):
+            st.session_state.refresh_nonce += 1
 
-    try:
-        data = load_data(data_directory)
-    except DataValidationError as exc:
-        st.error(str(exc))
-        st.info("Required files: iran_events.csv, gdelt_sentiment.csv, historical_events.csv")
+    route = route_for(start, end)
+    route_label = f"{start} → {end}"
+    if not route:
+        st.info("This origin–destination pair is not covered by the fixed heuristic. Choose another supported pair; the dashboard will not invent a route.")
         st.stop()
 
-    score, event_data = calculate_current_risk(data["iran_events.csv"], data["gdelt_sentiment.csv"])
-    events = data["iran_events.csv"]
-    articles = data["gdelt_sentiment.csv"].copy()
-    history = calculate_historical_risk(data["historical_events.csv"])
+    st.caption("Chokepoint-modeled route, not real-time vessel tracking.")
+    with st.expander("How this route and score are modeled"):
+        st.write(" → ".join([start, *[item.name for item in route], end]))
+        st.write("The fixed chokepoint rules are an illustrative shortcut, not precise geospatial routing. Each usable chokepoint score combines 60% GDELT Event risk and 40% VADER article-sentiment risk; the route score is their equal-weight average.")
 
-    st.markdown("### Current composite risk")
-    headline, event_metric, sentiment_metric, context_metric = st.columns([1.35, 1, 1, 1])
-    with headline:
-        st.markdown(
-            f"<div style='padding: 1rem; border-left: 8px solid {score_colour(score['category'])}; background: #f7f8fa;'>"
-            f"<div style='font-size: .9rem;'>CURRENT RISK</div><div style='font-size: 3rem; font-weight: 700;'>"
-            f"{score['composite_score']:.2f}<span style='font-size: 1.1rem;'> / 100</span></div>"
-            f"<div style='font-weight: 700; color: {score_colour(score['category'])};'>{score['category']}</div></div>",
-            unsafe_allow_html=True,
-        )
-    event_metric.metric("GDELT event risk", f"{score['event_score']:.2f}", "60% weight")
-    sentiment_metric.metric("VADER sentiment risk", f"{score['sentiment_score']:.2f}", "40% weight")
-    context_metric.metric("Iran-related events", f"{len(events):,}", "current event file")
+    try:
+        with st.spinner("Checking the latest data source..."):
+            all_events, event_status = load_latest_events(st.session_state.refresh_nonce, offline)
+    except LiveDataError:
+        st.info("Live data is unavailable and no saved snapshot is available yet. Try again on a working network, or use the bundled snapshot for a Hormuz route.")
+        st.stop()
 
-    st.info(explanation(score, events, articles))
+    if event_status["source"] == "live":
+        st.caption(f"Live data loaded • {friendly_time(event_status['fetched_at'])}")
+    else:
+        st.info(f"{event_status['message']} Saved {friendly_time(event_status['fetched_at'])}.")
 
-    left, right = st.columns([1.7, 1])
-    with left:
-        st.subheader("Historical risk trend")
-        recent = history[history["date"] >= history["date"].max() - pd.Timedelta(days=60)]
-        trend = px.line(
-            recent,
-            x="date",
-            y=["risk_score", "event_risk", "tone_sentiment_proxy"],
-            labels={"value": "Risk score (0–100)", "variable": "Series", "date": "Date"},
-            color_discrete_map={"risk_score": "#c74343", "event_risk": "#2467a8", "tone_sentiment_proxy": "#8c5bb3"},
-        )
-        trend.update_traces(mode="lines+markers")
-        trend.add_hline(y=25, line_dash="dot", line_color="#d98000", annotation_text="Medium threshold")
-        trend.add_hline(y=50, line_dash="dot", line_color="#c74343", annotation_text="High threshold")
-        trend.update_layout(legend_title_text="", yaxis_range=[0, 100], margin=dict(l=10, r=10, t=20, b=10))
+    successful: list[dict] = []
+    excluded: list[str] = []
+    fallback_notes: list[str] = []
+    for chokepoint in route:
+        events = filter_events(all_events, chokepoint)
+        if events.empty:
+            excluded.append(f"{chokepoint.name}: no matching events in this snapshot")
+            continue
+        try:
+            articles, article_status = load_route_articles(chokepoint.key, st.session_state.refresh_nonce, offline)
+        except LiveDataError:
+            excluded.append(f"{chokepoint.name}: no saved article data is available")
+            continue
+        if articles.empty:
+            excluded.append(f"{chokepoint.name}: no recent route-relevant articles")
+            continue
+        if article_status["source"] != "live":
+            fallback_notes.append(article_status["message"])
+        score, scored_events = calculate_current_risk(events, articles)
+        successful.append({"chokepoint": chokepoint, "score": score, "events": scored_events, "articles": articles})
+
+    if fallback_notes:
+        st.info(" ".join(dict.fromkeys(fallback_notes)))
+    if excluded:
+        st.caption("Unavailable chokepoints are excluded, not scored as zero: " + " • ".join(excluded))
+    if not successful:
+        st.info("No chokepoint has both usable event and article data for this route yet. The app remains ready to use cached data when a snapshot is available.")
+        st.stop()
+
+    route_score = sum(item["score"]["composite_score"] for item in successful) / len(successful)
+    category = risk_category(route_score)
+    overview_tab, evidence_tab, trend_tab, method_tab = st.tabs(["Overview", "Evidence", "Trend", "Method"])
+
+    with overview_tab:
+        st.subheader(route_label)
+        score_column, components_column, coverage_column = st.columns(3)
+        score_column.metric("Route risk", f"{route_score:.2f} / 100")
+        with components_column:
+            st.metric("Usable chokepoints", f"{len(successful)} / {len(route)}")
+            st.caption("Equal route weights")
+        with coverage_column:
+            average_event = sum(item["score"]["event_score"] for item in successful) / len(successful)
+            average_sentiment = sum(item["score"]["sentiment_score"] for item in successful) / len(successful)
+            st.metric("Average components", f"{average_event:.1f} / {average_sentiment:.1f}")
+            st.caption("Event / VADER")
+        risk_status(category)
+        st.subheader("Per-chokepoint breakdown")
+        breakdown = pd.DataFrame([
+            {"Chokepoint": item["chokepoint"].name, "Risk score": item["score"]["composite_score"], "Category": item["score"]["category"], "Event risk (60%)": item["score"]["event_score"], "VADER risk (40%)": item["score"]["sentiment_score"], "Events": len(item["events"]), "Articles": len(item["articles"])}
+            for item in successful
+        ])
+        st.dataframe(breakdown, use_container_width=True, hide_index=True, column_config={"Risk score": st.column_config.NumberColumn(format="%.2f"), "Event risk (60%)": st.column_config.NumberColumn(format="%.2f"), "VADER risk (40%)": st.column_config.NumberColumn(format="%.2f")})
+
+    with evidence_tab:
+        st.subheader("Source articles used in the score")
+        articles = pd.concat([item["articles"].assign(chokepoint=item["chokepoint"].name) for item in successful], ignore_index=True)
+        articles["seendate"] = pd.to_datetime(articles["seendate"], errors="coerce")
+        st.dataframe(articles[["chokepoint", "seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False), use_container_width=True, hide_index=True, column_config={"url": st.column_config.LinkColumn("Source link", display_text="Open article"), "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f")})
+
+    with trend_tab:
+        trend_history = record_live_observation(route_label, route_score, event_status["fetched_at"])
+        st.subheader("Live route-risk observations")
+        if len(trend_history) == 1:
+            st.caption("First observation for this route in this browser session. Refresh live data to add a comparable observation.")
+        trend = px.line(trend_history, x="fetched_at", y="risk_score", markers=True, labels={"fetched_at": "Snapshot time", "risk_score": "Route risk (0–100)"})
+        trend.add_hline(y=25, line_dash="dot", line_color="#999999", annotation_text="Medium")
+        trend.add_hline(y=50, line_dash="dot", line_color="#999999", annotation_text="High")
+        trend.update_layout(yaxis_range=[0, 100], margin=dict(l=10, r=10, t=20, b=10), showlegend=False)
         st.plotly_chart(trend, use_container_width=True)
-        st.caption("Historical trend uses the available daily GDELT event aggregates. Its ‘sentiment proxy’ is AvgTone; it is not historical VADER article sentiment.")
-    with right:
-        st.subheader("How the score is built")
-        contribution = pd.DataFrame({
-            "Component": ["GDELT event risk", "VADER sentiment risk"],
-            "Weighted contribution": [EVENT_WEIGHT * score["event_score"], SENTIMENT_WEIGHT * score["sentiment_score"]],
-            "Weight": ["60%", "40%"],
-        })
-        chart = px.bar(contribution, x="Weighted contribution", y="Component", orientation="h", text_auto=".2f", color="Component", color_discrete_sequence=["#2467a8", "#8c5bb3"])
-        chart.update_layout(showlegend=False, xaxis_range=[0, 100], margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(chart, use_container_width=True)
-        st.caption("Event risk = 60% Goldstein component + 40% full-range AvgTone component. Composite = 60% event risk + 40% VADER sentiment risk.")
 
-    st.subheader("Event breakdown")
-    event_summary = event_data.assign(
-        GoldsteinScale=pd.to_numeric(event_data["GoldsteinScale"], errors="coerce"),
-        AvgTone=pd.to_numeric(event_data["AvgTone"], errors="coerce"),
-        NumMentions=pd.to_numeric(event_data["NumMentions"], errors="coerce"),
-    )
-    root_summary = (
-        event_summary.groupby("EventRootCode", dropna=False)
-        .agg(events=("EventCode", "size"), average_goldstein=("GoldsteinScale", "mean"), average_tone=("AvgTone", "mean"), mentions=("NumMentions", "sum"))
-        .reset_index()
-        .sort_values(["average_goldstein", "events"], ascending=[True, False])
-    )
-    first, second, third = st.columns(3)
-    first.metric("Average Goldstein", f"{event_summary['GoldsteinScale'].mean():.2f}")
-    second.metric("Average AvgTone", f"{event_summary['AvgTone'].mean():.2f}")
-    third.metric("Total mentions", f"{event_summary['NumMentions'].sum():,.0f}")
-    st.caption("EventRootCode is shown as reported by GDELT; the dashboard does not invent event-type labels.")
-    st.dataframe(root_summary.head(10), use_container_width=True, hide_index=True)
-
-    st.subheader("Source articles and VADER sentiment")
-    articles["seendate"] = pd.to_datetime(articles["seendate"], errors="coerce")
-    article_view = articles[["seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False)
-    st.dataframe(
-        article_view,
-        column_config={
-            "seendate": st.column_config.DatetimeColumn("Seen date", format="YYYY-MM-DD"),
-            "url": st.column_config.LinkColumn("Source link", display_text="Open article"),
-            "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f"),
-        },
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    with st.expander("Experimental ML result — not deployed"):
-        st.write(
-            "We tested whether the available historical patterns could predict next-day risk. "
-            "They did not outperform simple baselines, so prediction is not used in this dashboard."
-        )
-        ml = pd.DataFrame({
-            "Experiment": ["Risk-direction classification", "Next-day risk regression"],
-            "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"],
-            "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"],
-            "Live use": ["Not deployed", "Not deployed"],
-        })
-        st.dataframe(ml, use_container_width=True, hide_index=True)
-
-    st.caption("Method correction: AvgTone is normalized across its full −100 to +100 range. Earlier ±10 clipping was removed because it understated tone variation.")
+    with method_tab:
+        st.subheader("Score method")
+        st.write(f"Event risk: 60% Goldstein component + 40% AvgTone component. Composite: {EVENT_WEIGHT:.0%} Event risk + {SENTIMENT_WEIGHT:.0%} VADER sentiment risk. AvgTone is normalized across its full −100 to +100 range.")
+        with st.expander("Experimental ML result — not deployed"):
+            st.write("We tested whether historical patterns could predict next-day risk. They did not outperform simple baselines, so prediction is not used in this dashboard.")
+            st.dataframe(pd.DataFrame({"Experiment": ["Risk-direction classification", "Next-day risk regression"], "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"], "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"], "Live use": ["Not deployed", "Not deployed"]}), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":
