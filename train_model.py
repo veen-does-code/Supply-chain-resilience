@@ -1,4 +1,7 @@
 import pandas as pd
+
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -6,11 +9,25 @@ from sklearn.metrics import (
     classification_report
 )
 
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
 print("Loading training data...")
 
 df = pd.read_csv("training_data.csv")
 
-# Features available at the end of today
+df["date"] = pd.to_datetime(df["date"])
+
+# Sort chronologically
+df = df.sort_values("date").reset_index(drop=True)
+
+
+# ============================================================
+# FEATURES AND TARGET
+# ============================================================
+
 features = [
     "event_count",
     "avg_goldstein",
@@ -19,18 +36,22 @@ features = [
     "risk_score",
     "goldstein_change",
     "tone_change",
-    "event_count_change"
+    "event_count_change",
+    "risk_change"
 ]
 
 target = "risk_increase_tomorrow"
 
+
 X = df[features]
 y = df[target]
 
-# -----------------------------------------
-# TIME-BASED TRAIN / TEST SPLIT
-# -----------------------------------------
 
+# ============================================================
+# TIME-BASED TRAIN / TEST SPLIT
+# ============================================================
+
+# 80% training, 20% testing
 split_index = int(len(df) * 0.8)
 
 X_train = X.iloc[:split_index]
@@ -38,6 +59,9 @@ X_test = X.iloc[split_index:]
 
 y_train = y.iloc[:split_index]
 y_test = y.iloc[split_index:]
+
+dates_test = df["date"].iloc[split_index:]
+
 
 print()
 print("Training samples:", len(X_train))
@@ -51,36 +75,56 @@ print()
 print("Testing target distribution:")
 print(y_test.value_counts())
 
-# -----------------------------------------
-# LOGISTIC REGRESSION
-# -----------------------------------------
+
+# ============================================================
+# LOGISTIC REGRESSION PIPELINE
+# ============================================================
 
 print()
 print("==============================")
 print("   LOGISTIC REGRESSION")
 print("==============================")
 
-model = LogisticRegression(
-    max_iter=1000
-)
 
+model = Pipeline([
+    (
+        "scaler",
+        StandardScaler()
+    ),
+    (
+        "logreg",
+        LogisticRegression(
+            max_iter=5000,
+            random_state=42
+        )
+    )
+])
+
+
+# Train
 model.fit(X_train, y_train)
 
-# Predictions
+
+# ============================================================
+# PREDICTION
+# ============================================================
+
 y_pred = model.predict(X_test)
 
-# -----------------------------------------
+
+# ============================================================
 # EVALUATION
-# -----------------------------------------
+# ============================================================
 
 accuracy = accuracy_score(y_test, y_pred)
 
-print()
 print(f"Accuracy: {accuracy * 100:.2f}%")
+
 
 print()
 print("Confusion Matrix:")
 print(confusion_matrix(y_test, y_pred))
+
 
 print()
 print("Classification Report:")
@@ -92,39 +136,45 @@ print(
     )
 )
 
-# -----------------------------------------
+
+# ============================================================
 # FEATURE IMPORTANCE
-# -----------------------------------------
-
-importance = pd.DataFrame({
-    "feature": features,
-    "coefficient": model.coef_[0]
-})
-
-importance["absolute_importance"] = (
-    importance["coefficient"].abs()
-)
-
-importance = importance.sort_values(
-    "absolute_importance",
-    ascending=False
-)
+# ============================================================
 
 print()
 print("==============================")
 print("   FEATURE IMPORTANCE")
 print("==============================")
 
-print(importance.to_string(index=False))
 
-# -----------------------------------------
-# SAVE
-# -----------------------------------------
+# Get coefficients from Logistic Regression
+coefficients = model.named_steps["logreg"].coef_[0]
 
-importance.to_csv(
+importance_df = pd.DataFrame({
+    "feature": features,
+    "coefficient": coefficients,
+    "absolute_importance": abs(coefficients)
+})
+
+# Sort by importance
+importance_df = importance_df.sort_values(
+    "absolute_importance",
+    ascending=False
+).reset_index(drop=True)
+
+
+print(importance_df.to_string(index=False))
+
+
+# ============================================================
+# SAVE FEATURE IMPORTANCE
+# ============================================================
+
+importance_df.to_csv(
     "feature_importance.csv",
     index=False
 )
+
 
 print()
 print("Saved:")
