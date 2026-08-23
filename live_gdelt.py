@@ -2,6 +2,24 @@
 
 Full technical exceptions are logged for debugging; callers only receive short
 human-readable messages suitable for the dashboard.
+
+Data can arrive from four places: a fresh live fetch, a locally pickled/CSV
+cache from a prior successful fetch, or a bundled legacy snapshot file left
+over from an earlier version of this project (iran_events.csv /
+gdelt_sentiment.csv). Only the live path is guaranteed to match the current
+column schema exactly, so every other path is passed through
+_normalise_event_frame / _normalise_article_frame before use. If a snapshot
+is missing a column that can't be reasonably inferred, normalisation returns
+None and the caller falls through to the next option -- a schema mismatch in
+an old file degrades gracefully instead of crashing the dashboard with a raw
+KeyError later in the UI.
+
+Schema note: per data_loader.py's validated column list, iran_events.csv was
+pre-filtered to Iran/Hormuz events at creation time and does NOT carry
+per-row actor/country columns. It is therefore used wholesale for the Hormuz
+chokepoint only (see the "scope" field on its status, and
+events_for_chokepoint below) rather than being run through the normal
+country-code filter used for live/cached data.
 """
 
 from __future__ import annotations
@@ -37,6 +55,24 @@ EVENT_COLUMNS = [
 ]
 EVENT_USECOLS = [0, 1, 6, 7, 16, 17, 26, 27, 28, 29, 30, 31, 32, 33, 34, 57]
 ARTICLE_COLUMNS = ["title", "url", "seendate", "domain", "language", "sourcecountry", "sentiment", "sentiment_score"]
+
+# Columns a fallback file MUST have (directly or via an alias below) or the
+# snapshot is treated as unusable rather than risking a crash downstream.
+# Actor/country columns are deliberately NOT required here: the bundled
+# iran_events.csv legitimately doesn't carry them (see module docstring).
+# Chokepoint scoping for that file is handled by events_for_chokepoint()
+# using the "scope" status field instead of per-row country matching.
+REQUIRED_EVENT_COLUMNS = ("GoldsteinScale", "AvgTone", "NumMentions")
+REQUIRED_ARTICLE_COLUMNS = ("title", "sentiment_score")
+
+# Best-effort aliases for older/differently-named columns in legacy files.
+ARTICLE_COLUMN_ALIASES = {
+    "sentiment_score": ("sentiment_score", "compound", "vader_compound", "vader_score", "polarity"),
+    "seendate": ("seendate", "date", "published", "pub_date"),
+    "sentiment": ("sentiment", "sentiment_label", "label"),
+    "url": ("url", "link", "source_url", "sourceurl"),
+    "domain": ("domain", "source", "source_domain"),
+}
 
 
 class LiveDataError(RuntimeError):
@@ -90,8 +126,65 @@ def _read_metadata(name: str) -> dict[str, str]:
         return {}
 
 
-def _status(source: str, fetched_at: str, message: str, export_url: str = "") -> dict[str, str]:
-    return {"source": source, "fetched_at": fetched_at, "message": message, "export_url": export_url}
+def _status(source: str, fetched_at: str, message: str, export_url: str = "", scope: str = "") -> dict[str, str]:
+    return {"source": source, "fetched_at": fetched_at, "message": message, "export_url": export_url, "scope": scope}
+
+
+def _normalise_event_frame(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Align any event dataframe (live, cached, or legacy) to EVENT_COLUMNS.
+
+    Returns None if a required column can't be found, so the caller can fall
+    through to the next data source instead of crashing later. Actor/country
+    columns are filled with None if absent rather than required -- see the
+    module docstring for why (the bundled legacy snapshot legitimately lacks
+    them).
+    """
+    frame = df.copy()
+    frame.columns = [str(column).strip() for column in frame.columns]
+    missing_required = [column for column in REQUIRED_EVENT_COLUMNS if column not in frame.columns]
+    if missing_required:
+        LOGGER.warning("Event snapshot missing required columns %s; treating as unusable.", missing_required)
+        return None
+    for column in EVENT_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    frame["GoldsteinScale"] = pd.to_numeric(frame["GoldsteinScale"], errors="coerce")
+    frame["AvgTone"] = pd.to_numeric(frame["AvgTone"], errors="coerce")
+    frame["NumMentions"] = pd.to_numeric(frame["NumMentions"], errors="coerce")
+    return frame[EVENT_COLUMNS]
+
+
+def _normalise_article_frame(df: pd.DataFrame) -> pd.DataFrame | None:
+    """Align any article dataframe (live, cached, or legacy) to ARTICLE_COLUMNS.
+
+    Applies best-effort column aliasing for legacy files, then returns None
+    if a required column still can't be found -- same fall-through contract
+    as _normalise_event_frame.
+    """
+    frame = df.copy()
+    frame.columns = [str(column).strip() for column in frame.columns]
+    for target, aliases in ARTICLE_COLUMN_ALIASES.items():
+        if target in frame.columns:
+            continue
+        match = next((alias for alias in aliases if alias in frame.columns), None)
+        if match:
+            frame[target] = frame[match]
+    missing_required = [column for column in REQUIRED_ARTICLE_COLUMNS if column not in frame.columns]
+    if missing_required:
+        LOGGER.warning("Article snapshot missing required columns %s; treating as unusable.", missing_required)
+        return None
+    frame["sentiment_score"] = pd.to_numeric(frame["sentiment_score"], errors="coerce")
+    if "sentiment" not in frame.columns or frame["sentiment"].isna().all():
+        frame["sentiment"] = pd.cut(
+            frame["sentiment_score"],
+            bins=[-float("inf"), -0.05, 0.05, float("inf")],
+            labels=["Negative", "Neutral", "Positive"],
+            include_lowest=True,
+        ).astype(str)
+    for column in ARTICLE_COLUMNS:
+        if column not in frame.columns:
+            frame[column] = None
+    return frame[ARTICLE_COLUMNS]
 
 
 def check_connectivity(session: requests.Session | None = None) -> bool:
@@ -130,7 +223,10 @@ def _fetch_live_events() -> tuple[pd.DataFrame, str]:
     except (zipfile.BadZipFile, IndexError, pd.errors.ParserError) as exc:
         LOGGER.exception("Could not parse live GDELT Event export")
         raise LiveDataError("The newest GDELT Event file could not be read.") from exc
-    return events, export_url
+    normalised = _normalise_event_frame(events)
+    if normalised is None:
+        raise LiveDataError("The newest GDELT Event file did not match the expected format.")
+    return normalised, export_url
 
 
 def _save_event_cache(events: pd.DataFrame, export_url: str) -> None:
@@ -143,21 +239,41 @@ def _load_event_cache() -> tuple[pd.DataFrame, dict[str, str]] | None:
     if not path.exists():
         return None
     try:
-        return pd.read_pickle(path), _read_metadata("events.json")
+        events = pd.read_pickle(path)
     except Exception:
         LOGGER.exception("Could not load cached Event data")
         return None
+    normalised = _normalise_event_frame(events)
+    if normalised is None:
+        return None
+    return normalised, _read_metadata("events.json")
 
 
 def _legacy_event_snapshot() -> tuple[pd.DataFrame, dict[str, str]] | None:
+    """The bundled iran_events.csv -- pre-filtered to Iran/Hormuz at creation.
+
+    It has no actor/country columns to filter by, so it is flagged with
+    scope="hormuz_only" and used wholesale for the Hormuz chokepoint only by
+    events_for_chokepoint(), never run through the generic country-code
+    filter used for live/cached data.
+    """
     path = Path(__file__).with_name("iran_events.csv")
     if not path.exists():
         return None
     try:
-        return pd.read_csv(path), _status("local", datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(), "Showing the bundled Hormuz/Iran snapshot; live data is unavailable.")
+        raw = pd.read_csv(path)
     except Exception:
-        LOGGER.exception("Could not load legacy event fallback")
+        LOGGER.exception("Could not read legacy event fallback")
         return None
+    normalised = _normalise_event_frame(raw)
+    if normalised is None:
+        return None
+    fetched_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    return normalised, _status(
+        "local", fetched_at,
+        "Showing the bundled Hormuz/Iran snapshot; live data is unavailable.",
+        scope="hormuz_only",
+    )
 
 
 def load_event_data(force_offline: bool = False) -> tuple[pd.DataFrame, dict[str, str]]:
@@ -172,21 +288,48 @@ def load_event_data(force_offline: bool = False) -> tuple[pd.DataFrame, dict[str
     cached = _load_event_cache()
     if cached:
         events, metadata = cached
-        return events, _status("cache", metadata.get("fetched_at", "an unknown time"), "Showing cached Event data; live refresh is unavailable.", metadata.get("export_url", ""))
+        return events, _status(
+            "cache", metadata.get("fetched_at", "an unknown time"),
+            "Showing cached Event data; live refresh is unavailable.",
+            metadata.get("export_url", ""),
+        )
     local = _legacy_event_snapshot()
     if local:
         return local
-    raise LiveDataError("Live data is unavailable and no cached snapshot is stored yet.")
+    raise LiveDataError("Live data is unavailable and no compatible cached or local snapshot could be loaded.")
 
 
 def filter_events(events: pd.DataFrame, chokepoint: Chokepoint) -> pd.DataFrame:
-    """Filter events by the chokepoint's documented country codes and terms."""
+    """Filter events by the chokepoint's documented country codes and terms.
+
+    Only meaningful for data that actually carries actor/country columns
+    (live and cached data). Use events_for_chokepoint() as the general entry
+    point -- it routes scoped legacy data correctly instead of calling this
+    directly.
+    """
     codes = set(chokepoint.country_codes)
     terms = "|".join(chokepoint.search_terms)
     actor_one = events["Actor1CountryCode"].fillna("").str.upper().isin(codes)
     actor_two = events["Actor2CountryCode"].fillna("").str.upper().isin(codes)
     names = events["Actor1Name"].fillna("").str.contains(terms, case=False, regex=True) | events["Actor2Name"].fillna("").str.contains(terms, case=False, regex=True)
     return events[actor_one | actor_two | names].copy()
+
+
+def events_for_chokepoint(events: pd.DataFrame, chokepoint: Chokepoint, event_status: dict[str, str]) -> pd.DataFrame:
+    """Select events relevant to a chokepoint, respecting the source's scope.
+
+    Live and cached data cover many countries and are filtered by the
+    chokepoint's country codes/search terms via filter_events(). The bundled
+    legacy snapshot (scope == "hormuz_only") is pre-filtered to Iran/Hormuz
+    and carries no country columns to filter by, so it is used wholesale for
+    the Hormuz chokepoint only, and treated as empty (unavailable, not zero)
+    for every other chokepoint.
+    """
+    if event_status.get("scope") == "hormuz_only":
+        if chokepoint.key == "hormuz":
+            return events.copy()
+        return events.iloc[0:0].copy()
+    return filter_events(events, chokepoint)
 
 
 def _article_query(chokepoint: Chokepoint) -> str:
@@ -207,11 +350,10 @@ def _fetch_live_articles(chokepoint: Chokepoint) -> pd.DataFrame:
         return pd.DataFrame(columns=ARTICLE_COLUMNS)
     scores = articles["title"].fillna("").map(lambda title: SentimentIntensityAnalyzer().polarity_scores(title)["compound"])
     articles["sentiment_score"] = scores
-    articles["sentiment"] = pd.cut(scores, bins=[-float("inf"), -0.05, 0.05, float("inf")], labels=["Negative", "Neutral", "Positive"], include_lowest=True).astype(str)
-    for column in ("url", "seendate", "domain", "language", "sourcecountry"):
-        if column not in articles:
-            articles[column] = None
-    return articles[ARTICLE_COLUMNS]
+    normalised = _normalise_article_frame(articles)
+    if normalised is None:
+        raise LiveDataError("Live GDELT article data did not match the expected format.")
+    return normalised
 
 
 def _article_cache_name(chokepoint: Chokepoint) -> str:
@@ -223,10 +365,14 @@ def _load_article_cache(chokepoint: Chokepoint) -> tuple[pd.DataFrame, dict[str,
     if not path.exists():
         return None
     try:
-        return pd.read_csv(path), _read_metadata(f"articles_{chokepoint.key}.json")
+        raw = pd.read_csv(path)
     except Exception:
         LOGGER.exception("Could not load cached articles for %s", chokepoint.key)
         return None
+    normalised = _normalise_article_frame(raw)
+    if normalised is None:
+        return None
+    return normalised, _read_metadata(f"articles_{chokepoint.key}.json")
 
 
 def _legacy_article_snapshot(chokepoint: Chokepoint) -> tuple[pd.DataFrame, dict[str, str]] | None:
@@ -236,10 +382,15 @@ def _legacy_article_snapshot(chokepoint: Chokepoint) -> tuple[pd.DataFrame, dict
     if not path.exists():
         return None
     try:
-        return pd.read_csv(path), _status("local", datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(), "Showing the bundled Hormuz/Iran article snapshot; live data is unavailable.")
+        raw = pd.read_csv(path)
     except Exception:
         LOGGER.exception("Could not load legacy article fallback")
         return None
+    normalised = _normalise_article_frame(raw)
+    if normalised is None:
+        return None
+    fetched_at = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat()
+    return normalised, _status("local", fetched_at, "Showing the bundled Hormuz/Iran article snapshot; live data is unavailable.")
 
 
 def load_articles(chokepoint: Chokepoint, force_offline: bool = False) -> tuple[pd.DataFrame, dict[str, str]]:
@@ -249,7 +400,7 @@ def load_articles(chokepoint: Chokepoint, force_offline: bool = False) -> tuple[
             articles = _fetch_live_articles(chokepoint)
             articles.to_csv(_cache_path(_article_cache_name(chokepoint)), index=False)
             metadata = _status("live", _now(), "Live GDELT article data loaded.")
-            _write_metadata(f"articles_{chokepoint.key}.json", **metadata)
+            _write_metadata(f"articles_{chokepoint.key}.json", **{k: v for k, v in metadata.items() if k != "scope"})
             return articles, metadata
         except (requests.RequestException, LiveDataError):
             LOGGER.exception("Live article fetch failed for %s; attempting fallback", chokepoint.key)
@@ -260,4 +411,4 @@ def load_articles(chokepoint: Chokepoint, force_offline: bool = False) -> tuple[
     local = _legacy_article_snapshot(chokepoint)
     if local:
         return local
-    raise LiveDataError(f"No cached article data is available for {chokepoint.name}.")
+    raise LiveDataError(f"No compatible cached or local article data is available for {chokepoint.name}.")

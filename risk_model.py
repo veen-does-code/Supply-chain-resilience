@@ -1,7 +1,8 @@
 """Transparent, current-risk scoring for the energy supply-chain dashboard.
 
-The model intentionally calculates and explains current risk.  It does not
-predict future risk.
+The model intentionally calculates and explains CURRENT risk. It does not
+predict future risk — see the app's "Method" tab for the documented, tested,
+and deliberately-not-deployed prediction experiment.
 """
 
 from __future__ import annotations
@@ -31,8 +32,9 @@ def normalise_tone(values: pd.Series) -> pd.Series:
     """Map GDELT AvgTone's full -100..+100 range to risk 1..0.
 
     Correction record: older project scripts clipped AvgTone to +/-10 before
-    scaling.  This implementation keeps the complete +/-100 range, so values
-    below -10 retain their additional risk signal.
+    scaling. This implementation keeps the complete +/-100 range, so values
+    below -10 retain their additional risk signal. (This is the fix that
+    moved the reference composite score from 57.82 to the corrected 52.49.)
     """
     return ((100 - pd.to_numeric(values, errors="coerce")) / 200).clip(0, 1)
 
@@ -62,26 +64,3 @@ def calculate_current_risk(events: pd.DataFrame, articles: pd.DataFrame) -> tupl
         "composite_score": composite,
         "category": risk_category(composite),
     }, event_data
-
-
-def calculate_historical_risk(history: pd.DataFrame) -> pd.DataFrame:
-    """Create a comparable daily event/tone trend from historical event data.
-
-    Historical article-level VADER scores are unavailable.  The trend therefore
-    uses AvgTone as its documented daily sentiment proxy, rather than claiming
-    it is the live VADER component.
-    """
-    result = history.copy()
-    result["date"] = pd.to_datetime(result["date"], errors="coerce")
-    result = result.dropna(subset=["date"]).sort_values("date")
-    result["goldstein_risk_component"] = normalise_goldstein(result["avg_goldstein"])
-    result["tone_risk"] = normalise_tone(result["avg_tone"])
-    result["event_risk"] = (
-        0.60 * result["goldstein_risk_component"] + 0.40 * result["tone_risk"]
-    ) * 100
-    result["tone_sentiment_proxy"] = result["tone_risk"] * 100
-    result["risk_score"] = (
-        EVENT_WEIGHT * result["event_risk"]
-        + SENTIMENT_WEIGHT * result["tone_sentiment_proxy"]
-    )
-    return result

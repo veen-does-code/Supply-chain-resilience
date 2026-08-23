@@ -43,37 +43,62 @@ REGIONS = (
     "West Africa",
 )
 
+# Each value is an ordered tuple of CHOKEPOINTS keys for that corridor.  An
+# EMPTY tuple is a deliberate, documented statement that the corridor is
+# open-ocean in this simplified model — that is NOT the same thing as an
+# "unknown pair", which is represented by the pair being absent from this
+# table entirely. route_for() below preserves that distinction.
+_ROUTE_RULES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("Persian Gulf", "East Asia"): ("hormuz", "malacca"),
+    ("Persian Gulf", "Southeast Asia"): ("hormuz", "malacca"),
+    ("Persian Gulf", "South Asia"): ("hormuz",),
+    ("Persian Gulf", "Europe"): ("hormuz", "bab_el_mandeb", "suez"),
+    ("Persian Gulf", "Mediterranean"): ("hormuz", "bab_el_mandeb", "suez"),
+    ("Persian Gulf", "North America East Coast"): ("hormuz", "bab_el_mandeb", "suez", "gibraltar"),
+    ("Middle East", "East Asia"): ("hormuz", "malacca"),
+    ("Middle East", "Southeast Asia"): ("hormuz", "malacca"),
+    ("Middle East", "Europe"): ("hormuz", "bab_el_mandeb", "suez"),
+    ("Europe", "East Asia"): ("suez", "bab_el_mandeb", "malacca"),
+    ("Europe", "Southeast Asia"): ("suez", "bab_el_mandeb", "malacca"),
+    ("Europe", "North America East Coast"): ("gibraltar",),
+    ("Europe", "North America West Coast"): ("gibraltar", "panama"),
+    ("East Asia", "North America West Coast"): (),
+    ("East Asia", "North America East Coast"): ("panama",),
+    ("Southeast Asia", "Europe"): ("malacca", "bab_el_mandeb", "suez"),
+}
 
-def route_for(start: str, end: str) -> list[Chokepoint]:
+
+def route_for(start: str, end: str) -> list[Chokepoint] | None:
     """Return ordered chokepoints for a supported illustrative route.
 
-    The rules cover energy-shipping corridors, not every global pair.  Reversing
-    a known corridor reverses its chokepoint order.
+    Returns ``None`` when the origin-destination pair has no rule at all —
+    an unsupported pair; the caller should say so plainly and stop.
+
+    Returns an empty list when the pair *is* covered but the modeled
+    corridor legitimately has no major chokepoint (a documented open-ocean
+    route, e.g. trans-Pacific). The caller must not treat this the same as
+    "unsupported" — it is a correct answer, not a missing one.
     """
     if start == end:
-        return []
+        return None
     pair = (start, end)
-    rules = {
-        ("Persian Gulf", "East Asia"): ("hormuz", "malacca"),
-        ("Persian Gulf", "Southeast Asia"): ("hormuz", "malacca"),
-        ("Persian Gulf", "South Asia"): ("hormuz",),
-        ("Persian Gulf", "Europe"): ("hormuz", "bab_el_mandeb", "suez"),
-        ("Persian Gulf", "Mediterranean"): ("hormuz", "bab_el_mandeb", "suez"),
-        ("Persian Gulf", "North America East Coast"): ("hormuz", "bab_el_mandeb", "suez", "gibraltar"),
-        ("Middle East", "East Asia"): ("hormuz", "malacca"),
-        ("Middle East", "Southeast Asia"): ("hormuz", "malacca"),
-        ("Middle East", "Europe"): ("hormuz", "bab_el_mandeb", "suez"),
-        ("Europe", "East Asia"): ("suez", "bab_el_mandeb", "malacca"),
-        ("Europe", "Southeast Asia"): ("suez", "bab_el_mandeb", "malacca"),
-        ("Europe", "North America East Coast"): ("gibraltar",),
-        ("Europe", "North America West Coast"): ("gibraltar", "panama"),
-        ("East Asia", "North America West Coast"): (),
-        ("East Asia", "North America East Coast"): ("panama",),
-        ("Southeast Asia", "Europe"): ("malacca", "bab_el_mandeb", "suez"),
-    }
-    if pair in rules:
-        return [CHOKEPOINTS[key] for key in rules[pair]]
+    if pair in _ROUTE_RULES:
+        return [CHOKEPOINTS[key] for key in _ROUTE_RULES[pair]]
     reversed_pair = (end, start)
-    if reversed_pair in rules:
-        return [CHOKEPOINTS[key] for key in reversed(rules[reversed_pair])]
-    return []
+    if reversed_pair in _ROUTE_RULES:
+        return [CHOKEPOINTS[key] for key in reversed(_ROUTE_RULES[reversed_pair])]
+    return None
+
+
+def alternative_origins(end: str, exclude: str) -> list[str]:
+    """Regions other than `exclude` with a known modeled route to `end`.
+
+    Used by the Adaptive Procurement Orchestrator to find alternative
+    sourcing origins worth comparing against the currently selected start
+    region. Only pairs already present in the fixed rules table are
+    considered -- this never invents a route for an unsupported pair, and a
+    region whose only relationship to `end` is a documented open-ocean
+    (chokepoint-free) corridor is included too, since that is still a valid,
+    scoreable route in this model.
+    """
+    return [region for region in REGIONS if region not in (end, exclude) and route_for(region, end) is not None]

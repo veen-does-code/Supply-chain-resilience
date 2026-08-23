@@ -8,9 +8,10 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from live_gdelt import LiveDataError, filter_events, load_articles, load_event_data
-from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT, calculate_current_risk, risk_category
-from routes import CHOKEPOINTS, REGIONS, route_for
+from live_gdelt import LiveDataError, load_event_data
+from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT
+from route_scoring import score_route
+from routes import REGIONS, alternative_origins, route_for
 
 
 st.set_page_config(page_title="Energy Route Risk", page_icon="⚡", layout="wide")
@@ -19,11 +20,6 @@ st.set_page_config(page_title="Energy Route Risk", page_icon="⚡", layout="wide
 @st.cache_data(ttl=300, show_spinner=False)
 def load_latest_events(refresh_nonce: int, offline: bool) -> tuple[pd.DataFrame, dict[str, str]]:
     return load_event_data(force_offline=offline)
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def load_route_articles(chokepoint_key: str, refresh_nonce: int, offline: bool) -> tuple[pd.DataFrame, dict[str, str]]:
-    return load_articles(CHOKEPOINTS[chokepoint_key], force_offline=offline)
 
 
 def friendly_time(value: str) -> str:
@@ -52,6 +48,10 @@ def risk_status(category: str) -> None:
         st.success(message)
 
 
+def route_path_label(start: str, route: list, end: str) -> str:
+    return " → ".join([start, *[item.name for item in route], end])
+
+
 def main() -> None:
     st.title("Energy Supply Route Risk Monitor")
     st.caption("Current GDELT signals for modeled energy-shipping chokepoints — not a forecast.")
@@ -70,13 +70,22 @@ def main() -> None:
 
     route = route_for(start, end)
     route_label = f"{start} → {end}"
-    if not route:
+
+    if route is None:
         st.info("This origin–destination pair is not covered by the fixed heuristic. Choose another supported pair; the dashboard will not invent a route.")
+        st.stop()
+
+    if not route:
+        st.info(
+            f"{route_label} is modeled as an open-ocean corridor with no major chokepoint in this simplified "
+            "heuristic, so there is nothing to score for this pair yet — this is a documented gap in the "
+            "route table, not an error."
+        )
         st.stop()
 
     st.caption("Chokepoint-modeled route, not real-time vessel tracking.")
     with st.expander("How this route and score are modeled"):
-        st.write(" → ".join([start, *[item.name for item in route], end]))
+        st.write(route_path_label(start, route, end))
         st.write("The fixed chokepoint rules are an illustrative shortcut, not precise geospatial routing. Each usable chokepoint score combines 60% GDELT Event risk and 40% VADER article-sentiment risk; the route score is their equal-weight average.")
 
     try:
@@ -91,38 +100,23 @@ def main() -> None:
     else:
         st.info(f"{event_status['message']} Saved {friendly_time(event_status['fetched_at'])}.")
 
-    successful: list[dict] = []
-    excluded: list[str] = []
-    fallback_notes: list[str] = []
-    for chokepoint in route:
-        events = filter_events(all_events, chokepoint)
-        if events.empty:
-            excluded.append(f"{chokepoint.name}: no matching events in this snapshot")
-            continue
-        try:
-            articles, article_status = load_route_articles(chokepoint.key, st.session_state.refresh_nonce, offline)
-        except LiveDataError:
-            excluded.append(f"{chokepoint.name}: no saved article data is available")
-            continue
-        if articles.empty:
-            excluded.append(f"{chokepoint.name}: no recent route-relevant articles")
-            continue
-        if article_status["source"] != "live":
-            fallback_notes.append(article_status["message"])
-        score, scored_events = calculate_current_risk(events, articles)
-        successful.append({"chokepoint": chokepoint, "score": score, "events": scored_events, "articles": articles})
+    result = score_route(route, all_events, event_status, st.session_state.refresh_nonce, offline)
 
-    if fallback_notes:
-        st.info(" ".join(dict.fromkeys(fallback_notes)))
-    if excluded:
-        st.caption("Unavailable chokepoints are excluded, not scored as zero: " + " • ".join(excluded))
-    if not successful:
+    if result["fallback_notes"]:
+        st.info(" ".join(dict.fromkeys(result["fallback_notes"])))
+    if result["excluded"]:
+        st.caption("Unavailable chokepoints are excluded, not scored as zero: " + " • ".join(result["excluded"]))
+    if result["score"] is None:
         st.info("No chokepoint has both usable event and article data for this route yet. The app remains ready to use cached data when a snapshot is available.")
         st.stop()
 
-    route_score = sum(item["score"]["composite_score"] for item in successful) / len(successful)
-    category = risk_category(route_score)
-    overview_tab, evidence_tab, trend_tab, method_tab = st.tabs(["Overview", "Evidence", "Trend", "Method"])
+    successful = result["successful"]
+    route_score = result["score"]
+    category = result["category"]
+
+    overview_tab, orchestrator_tab, evidence_tab, trend_tab, method_tab = st.tabs(
+        ["Overview", "Procurement Orchestrator", "Evidence", "Trend", "Method"]
+    )
 
     with overview_tab:
         st.subheader(route_label)
@@ -144,6 +138,67 @@ def main() -> None:
         ])
         st.dataframe(breakdown, use_container_width=True, hide_index=True, column_config={"Risk score": st.column_config.NumberColumn(format="%.2f"), "Event risk (60%)": st.column_config.NumberColumn(format="%.2f"), "VADER risk (40%)": st.column_config.NumberColumn(format="%.2f")})
 
+    with orchestrator_tab:
+        st.subheader("Adaptive Procurement Orchestrator")
+        st.caption(
+            "Ranks alternative sourcing origins to the same destination by modeled current risk. "
+            "It does not account for cost, contract terms, lead time, refinery compatibility, or the "
+            "physical feasibility of actually switching sources — it is a risk-ranking aid for a "
+            "procurement team to act on, not an automated sourcing decision."
+        )
+        candidates = alternative_origins(end, start)
+        if not candidates:
+            st.info("No alternative origin region has a modeled route to this destination in the fixed rules table.")
+        else:
+            rows = [{
+                "Origin": start,
+                "Modeled route": route_path_label(start, route, end),
+                "Risk score": route_score,
+                "Category": category,
+                "Δ vs current": 0.0,
+                "_current": True,
+            }]
+            with st.spinner("Scoring alternative sourcing origins..."):
+                for origin in candidates:
+                    alt_route = route_for(origin, end)
+                    if not alt_route:
+                        continue
+                    alt_result = score_route(alt_route, all_events, event_status, st.session_state.refresh_nonce, offline)
+                    if alt_result["score"] is None:
+                        continue
+                    rows.append({
+                        "Origin": origin,
+                        "Modeled route": route_path_label(origin, alt_route, end),
+                        "Risk score": alt_result["score"],
+                        "Category": alt_result["category"],
+                        "Δ vs current": alt_result["score"] - route_score,
+                        "_current": False,
+                    })
+
+            ranking = pd.DataFrame(rows).sort_values("Risk score").reset_index(drop=True)
+            st.dataframe(
+                ranking.drop(columns="_current"),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Risk score": st.column_config.NumberColumn(format="%.2f"),
+                    "Δ vs current": st.column_config.NumberColumn(format="%+.2f"),
+                },
+            )
+
+            best = ranking.iloc[0]
+            if not bool(best["_current"]) and best["Risk score"] < route_score - 0.01:
+                st.success(
+                    f"Lower modeled risk available: sourcing from **{best['Origin']}** instead of "
+                    f"**{start}** would change the modeled route risk from {route_score:.2f} ({category}) "
+                    f"to {best['Risk score']:.2f} ({best['Category']})."
+                )
+            else:
+                st.info(f"{start} is already the lowest modeled-risk origin among the alternatives evaluated for this destination.")
+
+            if len(ranking) < len(candidates) + 1:
+                st.caption("Some alternative origins were skipped — no usable event/article data was available for their modeled chokepoints in this snapshot.")
+
     with evidence_tab:
         st.subheader("Source articles used in the score")
         articles = pd.concat([item["articles"].assign(chokepoint=item["chokepoint"].name) for item in successful], ignore_index=True)
@@ -164,6 +219,7 @@ def main() -> None:
     with method_tab:
         st.subheader("Score method")
         st.write(f"Event risk: 60% Goldstein component + 40% AvgTone component. Composite: {EVENT_WEIGHT:.0%} Event risk + {SENTIMENT_WEIGHT:.0%} VADER sentiment risk. AvgTone is normalized across its full −100 to +100 range.")
+        st.write("The Procurement Orchestrator tab reuses this exact scoring for every alternative origin — it is the same calculation applied to a different modeled route, not a separate model.")
         with st.expander("Experimental ML result — not deployed"):
             st.write("We tested whether historical patterns could predict next-day risk. They did not outperform simple baselines, so prediction is not used in this dashboard.")
             st.dataframe(pd.DataFrame({"Experiment": ["Risk-direction classification", "Next-day risk regression"], "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"], "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"], "Live use": ["Not deployed", "Not deployed"]}), use_container_width=True, hide_index=True)
