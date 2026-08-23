@@ -205,7 +205,8 @@ def _fetch_live_articles(chokepoint: Chokepoint) -> pd.DataFrame:
         raise LiveDataError("GDELT article data could not be read.") from exc
     if articles.empty or "title" not in articles:
         return pd.DataFrame(columns=ARTICLE_COLUMNS)
-    scores = articles["title"].fillna("").map(lambda title: SentimentIntensityAnalyzer().polarity_scores(title)["compound"])
+    analyzer = SentimentIntensityAnalyzer()
+    scores = articles["title"].fillna("").map(lambda title: analyzer.polarity_scores(title)["compound"])
     articles["sentiment_score"] = scores
     articles["sentiment"] = pd.cut(scores, bins=[-float("inf"), -0.05, 0.05, float("inf")], labels=["Negative", "Neutral", "Positive"], include_lowest=True).astype(str)
     for column in ("url", "seendate", "domain", "language", "sourcecountry"):
