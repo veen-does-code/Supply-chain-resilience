@@ -8,8 +8,8 @@ import pandas as pd
 GDELT_WEIGHT = 0.60
 SENTIMENT_WEIGHT = 0.40
 
-# Your current VADER result
-SENTIMENT_RISK = 57.14
+MEDIUM_THRESHOLD = 40
+HIGH_THRESHOLD = 70
 
 
 # ============================================================
@@ -18,43 +18,11 @@ SENTIMENT_RISK = 57.14
 
 print("Loading risk data...")
 
-event_df = pd.read_csv("gdelt_event_risk.csv")
 historical_df = pd.read_csv("historical_events.csv")
 
 
 # ============================================================
-# CALCULATE GDELT EVENT RISK
-# ============================================================
-
-gdelt_risk = event_df["event_risk"].mean() * 100
-
-
-# ============================================================
-# COMPOSITE RISK
-# ============================================================
-
-final_risk = (
-    GDELT_WEIGHT * gdelt_risk
-    + SENTIMENT_WEIGHT * SENTIMENT_RISK
-)
-
-
-# ============================================================
-# RISK CATEGORY
-# ============================================================
-
-if final_risk < 33.33:
-    category = "LOW"
-
-elif final_risk < 66.67:
-    category = "MEDIUM"
-
-else:
-    category = "HIGH"
-
-
-# ============================================================
-# PREPARE HISTORICAL DATA
+# PREPARE DATA
 # ============================================================
 
 historical_df["date"] = pd.to_datetime(
@@ -66,10 +34,77 @@ historical_df = historical_df.sort_values(
 ).reset_index(drop=True)
 
 
-# Latest available day
-latest = historical_df.iloc[-1]
+# ============================================================
+# CALCULATE DAILY RISK COMPONENTS
+# ============================================================
 
-# Previous available day
+# Goldstein:
+# -10 = highest conflict risk
+# +10 = lowest conflict risk
+#
+# Convert to 0-100 risk scale
+
+historical_df["goldstein_risk"] = (
+    (10 - historical_df["avg_goldstein"]) / 20
+) * 100
+
+historical_df["goldstein_risk"] = (
+    historical_df["goldstein_risk"].clip(0, 100)
+)
+
+
+# AvgTone:
+# More negative tone = higher risk
+
+historical_df["tone_risk"] = (
+    (10 - historical_df["avg_tone"]) / 20
+) * 100
+
+historical_df["tone_risk"] = (
+    historical_df["tone_risk"].clip(0, 100)
+)
+
+
+# ============================================================
+# GDELT EVENT RISK
+# ============================================================
+
+historical_df["event_risk"] = (
+    0.60 * historical_df["goldstein_risk"]
+    + 0.40 * historical_df["tone_risk"]
+)
+
+
+# ============================================================
+# SENTIMENT RISK
+# ============================================================
+
+# Historical sentiment signal is GDELT AvgTone
+
+historical_df["sentiment_risk"] = (
+    historical_df["tone_risk"]
+)
+
+
+# ============================================================
+# COMPOSITE RISK
+# ============================================================
+
+historical_df["risk_score"] = (
+    GDELT_WEIGHT * historical_df["event_risk"]
+    + SENTIMENT_WEIGHT * historical_df["sentiment_risk"]
+)
+
+historical_df["risk_score"] = (
+    historical_df["risk_score"].clip(0, 100)
+)
+
+
+# ============================================================
+# LATEST AND PREVIOUS DATA
+# ============================================================
+
+latest = historical_df.iloc[-1]
 previous = historical_df.iloc[-2]
 
 
@@ -80,25 +115,49 @@ previous = historical_df.iloc[-2]
 current_date = latest["date"].date()
 
 event_count = latest["event_count"]
+total_mentions = latest["total_mentions"]
+total_sources = latest["total_sources"]
+total_articles = latest["total_articles"]
 
 avg_goldstein = latest["avg_goldstein"]
-
 avg_tone = latest["avg_tone"]
-
-total_mentions = latest["total_mentions"]
-
-total_sources = latest["total_sources"]
-
-total_articles = latest["total_articles"]
 
 
 # ============================================================
-# CHANGES
+# RISK VALUES
+# ============================================================
+
+event_risk = latest["event_risk"]
+sentiment_risk = latest["sentiment_risk"]
+final_risk = latest["risk_score"]
+
+
+# ============================================================
+# RISK CATEGORY
+# ============================================================
+
+if final_risk < MEDIUM_THRESHOLD:
+    category = "LOW"
+
+elif final_risk < HIGH_THRESHOLD:
+    category = "MEDIUM"
+
+else:
+    category = "HIGH"
+
+
+# ============================================================
+# CHANGES FROM PREVIOUS DAY
 # ============================================================
 
 event_change = (
     latest["event_count"]
     - previous["event_count"]
+)
+
+mentions_change = (
+    latest["total_mentions"]
+    - previous["total_mentions"]
 )
 
 goldstein_change = (
@@ -109,11 +168,6 @@ goldstein_change = (
 tone_change = (
     latest["avg_tone"]
     - previous["avg_tone"]
-)
-
-mentions_change = (
-    latest["total_mentions"]
-    - previous["total_mentions"]
 )
 
 
@@ -127,7 +181,6 @@ print("          IRAN RISK EXPLANATION")
 print("==============================================")
 
 print()
-
 print(f"Date: {current_date}")
 
 
@@ -155,13 +208,13 @@ print("----------------------------------------------")
 
 print(
     f"GDELT Event Risk      : "
-    f"{gdelt_risk:.2f} / 100 "
+    f"{event_risk:.2f} / 100 "
     f"({GDELT_WEIGHT * 100:.0f}%)"
 )
 
 print(
-    f"VADER Sentiment Risk  : "
-    f"{SENTIMENT_RISK:.2f} / 100 "
+    f"Sentiment Risk        : "
+    f"{sentiment_risk:.2f} / 100 "
     f"({SENTIMENT_WEIGHT * 100:.0f}%)"
 )
 
@@ -246,7 +299,10 @@ print("             RISK INTERPRETATION")
 print("----------------------------------------------")
 
 
+# ------------------------------------------------------------
 # Goldstein interpretation
+# ------------------------------------------------------------
+
 if avg_goldstein < 0:
 
     print(
@@ -262,7 +318,10 @@ else:
     )
 
 
+# ------------------------------------------------------------
 # Tone interpretation
+# ------------------------------------------------------------
+
 if avg_tone < 0:
 
     print(
@@ -276,7 +335,10 @@ else:
     )
 
 
+# ------------------------------------------------------------
 # Event activity
+# ------------------------------------------------------------
+
 if event_change > 0:
 
     print(
@@ -300,7 +362,10 @@ else:
     )
 
 
-# Mentions
+# ------------------------------------------------------------
+# Media mentions
+# ------------------------------------------------------------
+
 if mentions_change > 0:
 
     print(
