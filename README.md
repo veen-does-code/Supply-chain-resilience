@@ -83,11 +83,21 @@ whether a lower-risk sourcing alternative exists right now.
 
 This reuses `route_scoring.score_route()` for every candidate, so an
 alternative is never scored differently than the primary route would be if
-you'd picked it directly. Alternatives with no usable event/article data in
-the current snapshot are skipped and noted, not silently treated as
-risk-free. The tab is explicit that it ranks **modeled current risk only** —
+you'd picked it directly. Alternatives with incomplete event/article data in
+the current snapshot are shown as insufficient coverage, not silently treated
+as risk-free or ranked against complete routes. The tab is explicit that it ranks **modeled current risk only** —
 not cost, contract lead time, refinery compatibility, or real-world
 feasibility of switching suppliers.
+
+### Coverage guardrail
+
+A chokepoint can be scored from events alone or articles alone when one
+current source is temporarily unavailable; the missing component is neutral,
+not zero. However, procurement comparisons are only made when every modeled
+chokepoint has a current score. Partial values remain visible as monitoring
+signals, but they are not ranked against routes with different coverage.
+This prevents a misleading tie when two routes both contain the same lone
+observed chokepoint.
 
 ## Supply Chain Digital Twin
 
@@ -103,6 +113,8 @@ event and sentiment observations are used whenever present; malformed numeric
 values are handled as neutral rather than leaking `NaN` into the interface. If
 a route chokepoint has no usable local snapshot, the map explicitly falls
 back to the current route-average risk for visual continuity.
+Its tooltip labels this as a route-average fallback, so it is never confused
+with a local current observation.
 
 This is deliberately a transparent what-if simulation: its route line is the
 same fixed heuristic used by `routes.py`, and it uses the current calculated

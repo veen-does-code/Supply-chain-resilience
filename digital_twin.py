@@ -49,14 +49,18 @@ def create_twin_deck(
     route: Iterable[Chokepoint],
     node_risks: dict[str, float],
     affected_key: str | None = None,
+    fallback_keys: set[str] | None = None,
 ) -> pdk.Deck:
     """Render route anchors, chokepoint nodes, and the modeled corridor."""
     route = list(route)
+    fallback_keys = fallback_keys or set()
     start_lat, start_lon = REGION_COORDINATES[start]
     end_lat, end_lon = REGION_COORDINATES[end]
     def displayed_risk(checkpoint: Chokepoint) -> tuple[float, str]:
         value = node_risks.get(checkpoint.key)
         if value is not None and math.isfinite(value):
+            if checkpoint.key in fallback_keys:
+                return value, f"{value:.1f} / 100 (route-average fallback)"
             return value, f"{value:.1f} / 100"
         # This should only be reached if a caller bypasses app.py's fallback,
         # but it keeps the map safe and explicit rather than showing NaN.

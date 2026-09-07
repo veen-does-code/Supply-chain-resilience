@@ -134,9 +134,14 @@ def main() -> None:
             st.metric("Average components", f"{average_event:.1f} / {average_sentiment:.1f}")
             st.caption("Event / VADER")
         risk_status(category)
+        if not result["is_complete"]:
+            st.warning(
+                f"Partial coverage: this observed route score uses {len(successful)} of {len(route)} chokepoints. "
+                "It is useful for monitoring, but not suitable for ranking against a fully covered route."
+            )
         st.subheader("Per-chokepoint breakdown")
         breakdown = pd.DataFrame([
-            {"Chokepoint": item["chokepoint"].name, "Risk score": item["score"]["composite_score"], "Category": item["score"]["category"], "Event risk (60%)": item["score"]["event_score"], "VADER risk (40%)": item["score"]["sentiment_score"], "Events": len(item["events"]), "Articles": len(item["articles"])}
+            {"Chokepoint": item["chokepoint"].name, "Risk score": item["score"]["composite_score"], "Category": item["score"]["category"], "Data basis": item["data_basis"], "Event risk (60%)": item["score"]["event_score"], "VADER risk (40%)": item["score"]["sentiment_score"], "Events": len(item["events"]), "Articles": len(item["articles"])}
             for item in successful
         ])
         st.dataframe(breakdown, use_container_width=True, hide_index=True, column_config={"Risk score": st.column_config.NumberColumn(format="%.2f"), "Event risk (60%)": st.column_config.NumberColumn(format="%.2f"), "VADER risk (40%)": st.column_config.NumberColumn(format="%.2f")})
@@ -156,6 +161,7 @@ def main() -> None:
             for item in successful
             if math.isfinite(item["score"]["composite_score"])
         })
+        observed_keys = {item["chokepoint"].key for item in successful}
         control_col, result_col = st.columns([1, 1.4])
         with control_col:
             scenario_choices = ["No disruption", *[checkpoint.name for checkpoint in route]]
@@ -186,7 +192,11 @@ def main() -> None:
             else:
                 st.success("Baseline simulation: no additional disruption applied.")
         st.pydeck_chart(
-            create_twin_deck(start, end, route, node_risks, affected.key if affected and severity > 0 else None),
+            create_twin_deck(
+                start, end, route, node_risks,
+                affected.key if affected and severity > 0 else None,
+                {checkpoint.key for checkpoint in route if checkpoint.key not in observed_keys},
+            ),
             use_container_width=True,
             height=460,
         )
@@ -267,12 +277,15 @@ def main() -> None:
         if not candidates:
             st.info("No alternative origin region has a modeled route to this destination in the fixed rules table.")
         else:
+            current_complete = result["is_complete"]
             rows = [{
                 "Origin": start,
                 "Modeled route": route_path_label(start, route, end),
-                "Risk score": route_score,
+                "Comparable risk": route_score if current_complete else None,
+                "Observed partial risk": None if current_complete else route_score,
                 "Category": category,
-                "Δ vs current": 0.0,
+                "Status": "Ready to compare" if current_complete else "Insufficient coverage",
+                "Δ vs current": 0.0 if current_complete else None,
                 "Coverage": f"{len(successful)}/{len(route)}",
                 "_current": True,
             }]
@@ -284,25 +297,26 @@ def main() -> None:
                         continue
                     alt_result = score_route(alt_route, all_events, event_status, st.session_state.refresh_nonce, offline)
                     coverage_notes[origin] = alt_result["excluded"]
-                    if alt_result["score"] is None:
-                        continue
                     rows.append({
                         "Origin": origin,
                         "Modeled route": route_path_label(origin, alt_route, end),
-                        "Risk score": alt_result["score"],
+                        "Comparable risk": alt_result["score"] if alt_result["is_complete"] else None,
+                        "Observed partial risk": alt_result["score"] if alt_result["score"] is not None and not alt_result["is_complete"] else None,
                         "Category": alt_result["category"],
-                        "Δ vs current": alt_result["score"] - route_score,
+                        "Status": "Ready to compare" if alt_result["is_complete"] else "Insufficient coverage",
+                        "Δ vs current": alt_result["score"] - route_score if current_complete and alt_result["is_complete"] else None,
                         "Coverage": f"{len(alt_result['successful'])}/{len(alt_route)}",
                         "_current": False,
                     })
 
-            ranking = pd.DataFrame(rows).sort_values("Risk score").reset_index(drop=True)
+            ranking = pd.DataFrame(rows).sort_values(["Comparable risk", "Observed partial risk"], na_position="last").reset_index(drop=True)
             st.dataframe(
                 ranking.drop(columns="_current"),
                 use_container_width=True,
                 hide_index=True,
                 column_config={
-                    "Risk score": st.column_config.NumberColumn(format="%.2f"),
+                    "Comparable risk": st.column_config.NumberColumn("Comparable risk", format="%.2f", help="Only shown when every modeled chokepoint has a current score."),
+                    "Observed partial risk": st.column_config.NumberColumn("Observed partial risk", format="%.2f", help="Uses only currently observed chokepoints; do not compare this value across routes with different coverage."),
                     "Δ vs current": st.column_config.NumberColumn(format="%+.2f"),
                     "Coverage": st.column_config.TextColumn("Coverage", help="Usable chokepoints / total chokepoints modeled on that route. Matching scores usually mean matching coverage — check here before assuming a tie is a bug."),
                 },
@@ -316,24 +330,33 @@ def main() -> None:
                         else:
                             st.caption(f"{origin}: all modeled chokepoints had usable data.")
 
-            best = ranking.iloc[0]
-            if not bool(best["_current"]) and best["Risk score"] < route_score - 0.01:
+            comparable = ranking.dropna(subset=["Comparable risk"])
+            best = comparable.iloc[0] if not comparable.empty else None
+            if not current_complete:
+                st.warning("A route comparison is paused until every chokepoint on the current route has usable current data. Partial scores are shown for monitoring only.")
+            elif best is not None and not bool(best["_current"]) and best["Comparable risk"] < route_score - 0.01:
                 st.success(
                     f"Lower modeled risk available: sourcing from **{best['Origin']}** instead of "
                     f"**{start}** would change the modeled route risk from {route_score:.2f} ({category}) "
-                    f"to {best['Risk score']:.2f} ({best['Category']})."
+                    f"to {best['Comparable risk']:.2f} ({best['Category']})."
                 )
-            else:
+            elif best is not None:
                 st.info(f"{start} is already the lowest modeled-risk origin among the alternatives evaluated for this destination.")
+            else:
+                st.warning("No origin has complete current-data coverage yet, so no sourcing recommendation is shown.")
 
             if len(ranking) < len(candidates) + 1:
                 st.caption("Some alternative origins were skipped — no usable event/article data was available for their modeled chokepoints in this snapshot.")
 
     with evidence_tab:
         st.subheader("Source articles used in the score")
-        articles = pd.concat([item["articles"].assign(chokepoint=item["chokepoint"].name) for item in successful], ignore_index=True)
-        articles["seendate"] = pd.to_datetime(articles["seendate"], errors="coerce")
-        st.dataframe(articles[["chokepoint", "seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False), use_container_width=True, hide_index=True, column_config={"url": st.column_config.LinkColumn("Source link", display_text="Open article"), "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f")})
+        article_frames = [item["articles"].assign(chokepoint=item["chokepoint"].name) for item in successful if not item["articles"].empty]
+        if not article_frames:
+            st.info("No route-relevant articles are available in this snapshot. Chokepoints may still have event-only scores.")
+        else:
+            articles = pd.concat(article_frames, ignore_index=True)
+            articles["seendate"] = pd.to_datetime(articles["seendate"], errors="coerce")
+            st.dataframe(articles[["chokepoint", "seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False), use_container_width=True, hide_index=True, column_config={"url": st.column_config.LinkColumn("Source link", display_text="Open article"), "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f")})
 
     with trend_tab:
         trend_history = record_live_observation(route_label, route_score, event_status["fetched_at"])
