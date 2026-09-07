@@ -98,11 +98,31 @@ choose a chokepoint and continuously adjust a disruption severity slider to
 stress-test the corridor. The twin immediately shows the resulting modeled
 route-risk change, reliability, and illustrative delay.
 
+Every mapped chokepoint is shown with a finite current-risk value. Valid local
+event and sentiment observations are used whenever present; malformed numeric
+values are handled as neutral rather than leaking `NaN` into the interface. If
+a route chokepoint has no usable local snapshot, the map explicitly falls
+back to the current route-average risk for visual continuity.
+
 This is deliberately a transparent what-if simulation: its route line is the
 same fixed heuristic used by `routes.py`, and it uses the current calculated
 risk at the selected chokepoint to weight the simulated disruption. It is not
 AIS vessel tracking, precise geospatial routing, a forecast, or a shipping
 instruction.
+
+## Strategic Reserve Optimisation Agent
+
+The **Strategic Reserve** tab models a conservative day-by-day reserve
+drawdown schedule for the risk scenario currently set in the Digital Twin.
+Users can set available reserve days, a protected safety floor, and the
+planning horizon. The agent shows the estimated risk-derived supply gap,
+recommended drawdown, reserve remaining, and any gap that remains uncovered
+after preserving the safety floor.
+
+The supply gap is an illustrative stress profile derived from the current
+Digital Twin risk, not a real demand or supply forecast. Inventory quality,
+refinery constraints, contracts, and physical logistics are outside this
+hackathon model and are clearly excluded from its recommendations.
 
 ## Files
 
@@ -114,6 +134,7 @@ instruction.
 | `routes.py` | Chokepoint lookup table, the region-pair → chokepoint-route heuristic, and alternative-origin lookup |
 | `route_scoring.py` | Shared per-route scoring used by both the primary route view and the Procurement Orchestrator |
 | `digital_twin.py` | Geospatial network rendering and transparent what-if scenario calculation |
+| `reserve_optimizer.py` | Transparent risk-derived strategic reserve drawdown simulation |
 | `requirements.txt` | Python dependencies |
 
 ### Fix record: legacy Iran snapshot scoping

@@ -7,6 +7,8 @@ and deliberately-not-deployed prediction experiment.
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 
@@ -39,8 +41,22 @@ def normalise_tone(values: pd.Series) -> pd.Series:
     return ((100 - pd.to_numeric(values, errors="coerce")) / 200).clip(0, 1)
 
 
+def _finite_mean(values: pd.Series) -> float | None:
+    """Return a finite mean, rather than allowing missing source values to leak as NaN."""
+    numeric = pd.to_numeric(values, errors="coerce").replace([float("inf"), float("-inf")], pd.NA).dropna()
+    if numeric.empty:
+        return None
+    value = float(numeric.mean())
+    return value if math.isfinite(value) else None
+
+
 def calculate_current_risk(events: pd.DataFrame, articles: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
-    """Return the current 60/40 score and event-level calculation details."""
+    """Return a finite current-risk score and event-level calculation details.
+
+    A source with no valid numeric observations is treated as a neutral 50
+    until fresh data arrives. This avoids displaying a mathematically invalid
+    result while keeping the other, valid source signal in the calculation.
+    """
     event_data = events.copy()
     event_data["goldstein_risk_component"] = normalise_goldstein(event_data["GoldsteinScale"])
     event_data["tone_risk"] = normalise_tone(event_data["AvgTone"])
@@ -48,15 +64,29 @@ def calculate_current_risk(events: pd.DataFrame, articles: pd.DataFrame) -> tupl
         0.60 * event_data["goldstein_risk_component"]
         + 0.40 * event_data["tone_risk"]
     )
-    mentions = pd.to_numeric(event_data["NumMentions"], errors="coerce").fillna(0)
-    if mentions.sum() > 0:
-        event_score = float((event_data["event_risk"] * mentions).sum() / mentions.sum() * 100)
+    valid_events = event_data.dropna(subset=["event_risk"]).copy()
+    mentions = (
+        pd.to_numeric(valid_events["NumMentions"], errors="coerce")
+        .replace([float("inf"), float("-inf")], pd.NA)
+        .fillna(0)
+        .clip(lower=0)
+    )
+    if not valid_events.empty and mentions.sum() > 0:
+        event_score = float((valid_events["event_risk"] * mentions).sum() / mentions.sum() * 100)
     else:
-        event_score = float(event_data["event_risk"].mean() * 100)
+        event_mean = _finite_mean(valid_events["event_risk"] if not valid_events.empty else pd.Series(dtype=float))
+        event_score = 50.0 if event_mean is None else event_mean * 100
 
     article_scores = pd.to_numeric(articles["sentiment_score"], errors="coerce")
-    sentiment_score = float(((1 - article_scores) / 2).mean() * 100)
+    sentiment_mean = _finite_mean((1 - article_scores) / 2)
+    sentiment_score = 50.0 if sentiment_mean is None else sentiment_mean * 100
+    event_score = 50.0 if not math.isfinite(event_score) else max(0.0, min(100.0, event_score))
+    sentiment_score = 50.0 if not math.isfinite(sentiment_score) else max(0.0, min(100.0, sentiment_score))
     composite = EVENT_WEIGHT * event_score + SENTIMENT_WEIGHT * sentiment_score
+
+    # Defend the UI from malformed upstream values even if a future source
+    # changes schema or unexpectedly returns infinity.
+    composite = 50.0 if not math.isfinite(composite) else max(0.0, min(100.0, composite))
 
     return {
         "event_score": event_score,

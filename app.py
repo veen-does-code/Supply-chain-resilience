@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import math
 
 import pandas as pd
 import plotly.express as px
@@ -10,6 +11,7 @@ import streamlit as st
 
 from digital_twin import create_twin_deck, run_scenario
 from live_gdelt import LiveDataError, load_event_data
+from reserve_optimizer import optimise_reserve_drawdown
 from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT
 from route_scoring import score_route
 from routes import REGIONS, alternative_origins, route_for
@@ -115,8 +117,8 @@ def main() -> None:
     route_score = result["score"]
     category = result["category"]
 
-    overview_tab, twin_tab, orchestrator_tab, evidence_tab, trend_tab, method_tab = st.tabs(
-        ["Overview", "Digital Twin", "Procurement Orchestrator", "Evidence", "Trend", "Method"]
+    overview_tab, twin_tab, reserve_tab, orchestrator_tab, evidence_tab, trend_tab, method_tab = st.tabs(
+        ["Overview", "Digital Twin", "Strategic Reserve", "Procurement Orchestrator", "Evidence", "Trend", "Method"]
     )
 
     with overview_tab:
@@ -145,7 +147,15 @@ def main() -> None:
             "A geospatial simulation of the modeled energy corridor. Adjust a disruption and the scenario "
             "recalculates immediately from this route's current chokepoint risk signals."
         )
-        node_risks = {item["chokepoint"].key: item["score"]["composite_score"] for item in successful}
+        # Every mapped chokepoint receives a finite current-risk value. When
+        # there is no local snapshot, the displayed fallback is the current
+        # route average instead of the invalid "NaN" previously shown.
+        node_risks = {checkpoint.key: route_score for checkpoint in route}
+        node_risks.update({
+            item["chokepoint"].key: item["score"]["composite_score"]
+            for item in successful
+            if math.isfinite(item["score"]["composite_score"])
+        })
         control_col, result_col = st.columns([1, 1.4])
         with control_col:
             scenario_choices = ["No disruption", *[checkpoint.name for checkpoint in route]]
@@ -193,6 +203,57 @@ def main() -> None:
                 "Scenario risk increases by disruption severity, weighted by the selected chokepoint's current "
                 "observed risk. Delay and reliability are illustrative planning indicators."
             )
+
+    with reserve_tab:
+        st.subheader("Strategic Reserve Optimisation Agent")
+        st.caption(
+            "Models a conservative reserve drawdown schedule against the current digital-twin stress scenario. "
+            "All quantities are expressed as days of normal import demand."
+        )
+        reserve_controls, reserve_summary = st.columns([1, 1.4])
+        with reserve_controls:
+            reserve_days = st.slider("Available strategic reserve (days)", 15, 120, 60)
+            safety_floor = st.slider("Protected safety floor (days)", 0, reserve_days - 1, min(20, reserve_days - 1))
+            horizon_days = st.select_slider("Planning horizon", options=[7, 14, 21, 30], value=14, format_func=lambda days: f"{days} days")
+        reserve_schedule, reserve_result = optimise_reserve_drawdown(
+            scenario["projected_risk"], reserve_days, safety_floor, horizon_days
+        )
+        with reserve_summary:
+            drawdown_metric, remaining_metric, peak_metric = st.columns(3)
+            drawdown_metric.metric("Recommended drawdown", f"{reserve_result['total_drawdown']:.1f} days")
+            remaining_metric.metric("Reserve after horizon", f"{reserve_result['reserve_remaining']:.1f} days")
+            peak_metric.metric("Peak forecast gap", f"{reserve_result['peak_gap_percent']:.1f}%")
+            if reserve_result["uncovered_gap"] > 0:
+                st.warning(
+                    f"The stress scenario leaves {reserve_result['uncovered_gap']:.1f} demand-days uncovered after "
+                    "protecting the selected safety floor. Consider alternative sourcing or a lower reserve floor."
+                )
+            else:
+                st.success("The selected reserve can cover the illustrated gap while preserving the safety floor.")
+        reserve_chart = px.line(
+            reserve_schedule,
+            x="Day",
+            y="Reserve remaining (days)",
+            markers=True,
+            labels={"Reserve remaining (days)": "Reserve remaining (days of demand)"},
+        )
+        reserve_chart.add_hline(y=safety_floor, line_dash="dash", line_color="#f59e0b", annotation_text="Safety floor")
+        reserve_chart.update_layout(margin=dict(l=10, r=10, t=25, b=10), showlegend=False)
+        st.plotly_chart(reserve_chart, use_container_width=True)
+        st.dataframe(
+            reserve_schedule,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Forecast supply gap (% of daily demand)": st.column_config.NumberColumn(format="%.1f%%"),
+                "Recommended reserve drawdown (days)": st.column_config.NumberColumn(format="%.2f"),
+                "Reserve remaining (days)": st.column_config.NumberColumn(format="%.2f"),
+            },
+        )
+        st.info(
+            "This is a planning optimisation, not a supply forecast or an operational order. The gap is a transparent "
+            "risk-derived stress profile from the Digital Twin; it does not use inventory, refinery, demand, or contract data."
+        )
 
     with orchestrator_tab:
         st.subheader("Adaptive Procurement Orchestrator")

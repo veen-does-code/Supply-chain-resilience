@@ -6,6 +6,7 @@ is a decision-support simulation, not AIS vessel tracking or route planning.
 
 from __future__ import annotations
 
+import math
 from typing import Iterable
 
 import pandas as pd
@@ -33,7 +34,7 @@ REGION_COORDINATES: dict[str, tuple[float, float]] = {
 def _node_color(risk: float | None, affected: bool) -> list[int]:
     if affected:
         return [239, 68, 68]
-    if risk is None:
+    if risk is None or not math.isfinite(risk):
         return [148, 163, 184]
     if risk >= 50:
         return [239, 68, 68]
@@ -53,6 +54,14 @@ def create_twin_deck(
     route = list(route)
     start_lat, start_lon = REGION_COORDINATES[start]
     end_lat, end_lon = REGION_COORDINATES[end]
+    def displayed_risk(checkpoint: Chokepoint) -> tuple[float, str]:
+        value = node_risks.get(checkpoint.key)
+        if value is not None and math.isfinite(value):
+            return value, f"{value:.1f} / 100"
+        # This should only be reached if a caller bypasses app.py's fallback,
+        # but it keeps the map safe and explicit rather than showing NaN.
+        return 50.0, "50.0 / 100 (neutral fallback)"
+
     points = [
         {"name": start, "kind": "Origin", "latitude": start_lat, "longitude": start_lon,
          "risk": None, "color": [59, 130, 246]},
@@ -62,8 +71,8 @@ def create_twin_deck(
                 "kind": "Chokepoint",
                 "latitude": checkpoint.latitude,
                 "longitude": checkpoint.longitude,
-                "risk": node_risks.get(checkpoint.key),
-                "color": _node_color(node_risks.get(checkpoint.key), checkpoint.key == affected_key),
+                "risk": displayed_risk(checkpoint)[1],
+                "color": _node_color(displayed_risk(checkpoint)[0], checkpoint.key == affected_key),
             }
             for checkpoint in route
         ],
