@@ -8,6 +8,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from digital_twin import create_twin_deck, run_scenario
 from live_gdelt import LiveDataError, load_event_data
 from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT
 from route_scoring import score_route
@@ -114,8 +115,8 @@ def main() -> None:
     route_score = result["score"]
     category = result["category"]
 
-    overview_tab, orchestrator_tab, evidence_tab, trend_tab, method_tab = st.tabs(
-        ["Overview", "Procurement Orchestrator", "Evidence", "Trend", "Method"]
+    overview_tab, twin_tab, orchestrator_tab, evidence_tab, trend_tab, method_tab = st.tabs(
+        ["Overview", "Digital Twin", "Procurement Orchestrator", "Evidence", "Trend", "Method"]
     )
 
     with overview_tab:
@@ -137,6 +138,61 @@ def main() -> None:
             for item in successful
         ])
         st.dataframe(breakdown, use_container_width=True, hide_index=True, column_config={"Risk score": st.column_config.NumberColumn(format="%.2f"), "Event risk (60%)": st.column_config.NumberColumn(format="%.2f"), "VADER risk (40%)": st.column_config.NumberColumn(format="%.2f")})
+
+    with twin_tab:
+        st.subheader("Supply Chain Digital Twin")
+        st.caption(
+            "A geospatial simulation of the modeled energy corridor. Adjust a disruption and the scenario "
+            "recalculates immediately from this route's current chokepoint risk signals."
+        )
+        node_risks = {item["chokepoint"].key: item["score"]["composite_score"] for item in successful}
+        control_col, result_col = st.columns([1, 1.4])
+        with control_col:
+            scenario_choices = ["No disruption", *[checkpoint.name for checkpoint in route]]
+            selected_scenario = st.selectbox("Disruption location", scenario_choices)
+            affected = next((checkpoint for checkpoint in route if checkpoint.name == selected_scenario), None)
+            severity = st.slider(
+                "Disruption severity", min_value=0, max_value=100,
+                value=0 if affected is None else 50, step=5,
+                disabled=affected is None,
+                help="0 is normal operations; 100 represents a severe closure-level disruption in this illustrative model.",
+            )
+            if affected is None:
+                st.info("Select a chokepoint to run a what-if scenario.")
+                scenario = run_scenario(route_score, node_risks, None, 0)
+            else:
+                scenario = run_scenario(route_score, node_risks, affected.key, severity)
+                st.caption(f"Stress-testing {affected.name} at {severity}% severity.")
+        with result_col:
+            risk_metric, reliability_metric, delay_metric = st.columns(3)
+            risk_metric.metric("Projected route risk", f"{scenario['projected_risk']:.1f} / 100", f"{scenario['risk_change']:+.1f}")
+            reliability_metric.metric("Route reliability", f"{scenario['reliability']:.1f}%")
+            delay_metric.metric("Illustrative delay", f"{scenario['estimated_delay_days']:.1f} days")
+            if affected is not None and severity > 0:
+                st.warning(
+                    "Scenario output is a planning stress test, not a prediction or a shipping instruction. "
+                    "It combines the selected shock with the current risk baseline."
+                )
+            else:
+                st.success("Baseline simulation: no additional disruption applied.")
+        st.pydeck_chart(
+            create_twin_deck(start, end, route, node_risks, affected.key if affected and severity > 0 else None),
+            use_container_width=True,
+            height=460,
+        )
+        legend = pd.DataFrame([
+            {"Map marker": "Blue", "Meaning": "Origin"},
+            {"Map marker": "Purple", "Meaning": "Destination"},
+            {"Map marker": "Green / amber / red", "Meaning": "Current low / medium / high risk chokepoint"},
+            {"Map marker": "Red", "Meaning": "Selected disruption location"},
+        ])
+        with st.expander("Twin scope and assumptions"):
+            st.dataframe(legend, hide_index=True, use_container_width=True)
+            st.write(
+                "The lines show the project's fixed, ordered chokepoint heuristic; they are not exact sailing tracks. "
+                "Scenario risk increases by disruption severity, weighted by the selected chokepoint's current "
+                "observed risk. Delay and reliability are illustrative planning indicators."
+            )
 
     with orchestrator_tab:
         st.subheader("Adaptive Procurement Orchestrator")

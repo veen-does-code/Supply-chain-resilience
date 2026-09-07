@@ -89,6 +89,21 @@ risk-free. The tab is explicit that it ranks **modeled current risk only** —
 not cost, contract lead time, refinery compatibility, or real-world
 feasibility of switching suppliers.
 
+## Supply Chain Digital Twin
+
+The dashboard's **Digital Twin** tab presents the selected energy corridor as
+an interactive geospatial network: representative origin/destination hubs,
+the ordered maritime chokepoints, and their current risk state. Users can
+choose a chokepoint and continuously adjust a disruption severity slider to
+stress-test the corridor. The twin immediately shows the resulting modeled
+route-risk change, reliability, and illustrative delay.
+
+This is deliberately a transparent what-if simulation: its route line is the
+same fixed heuristic used by `routes.py`, and it uses the current calculated
+risk at the selected chokepoint to weight the simulated disruption. It is not
+AIS vessel tracking, precise geospatial routing, a forecast, or a shipping
+instruction.
+
 ## Files
 
 | File | Purpose |
@@ -98,6 +113,7 @@ feasibility of switching suppliers.
 | `risk_model.py` | Risk normalization and composite scoring formula |
 | `routes.py` | Chokepoint lookup table, the region-pair → chokepoint-route heuristic, and alternative-origin lookup |
 | `route_scoring.py` | Shared per-route scoring used by both the primary route view and the Procurement Orchestrator |
+| `digital_twin.py` | Geospatial network rendering and transparent what-if scenario calculation |
 | `requirements.txt` | Python dependencies |
 
 ### Fix record: legacy Iran snapshot scoping
