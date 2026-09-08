@@ -1,0 +1,27 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# This app's local live-data cache (created at runtime by live_gdelt.py)
+.gdelt_cache/
+
+# Streamlit secrets (if you ever add one)
+.streamlit/secrets.toml
+
+# OS/editor clutter
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Packaging artifacts
+*.egg-info/
+dist/
+build/
