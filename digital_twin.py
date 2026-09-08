@@ -107,7 +107,7 @@ def create_twin_deck(
 def run_scenario(base_score: float, node_risks: dict[str, float], affected_key: str | None, severity: int) -> dict[str, float]:
     """Calculate transparent, bounded what-if outputs for a selected shock."""
     current_node_risk = node_risks.get(affected_key or "", 0.0)
-    exposure = (current_node_risk / 100) if current_node_risk else 0.5
+    exposure = (current_node_risk / 100) if current_node_risk is not None else 0.5
     shock_points = severity * (0.35 + 0.65 * exposure)
     projected_risk = min(100.0, base_score + shock_points)
     return {
