@@ -68,23 +68,10 @@ labels its forecast as **experimental**: it appears only after three live
 route observations are available, remains separate from the current-risk
 score, and must not be treated as an operational or high-confidence forecast.
 
-### Reproducing the experiment
-
-The experiment is now retained in the repository as offline, reproducible
-code. It uses a chronological 80/20 train/test split (never a random split),
-lag, day-over-day-change, and three-observation rolling-mean features from
-the daily event history. Run:
-
-```bash
-python prepare_ml_data.py
-python evaluate_ml_experiment.py
-```
-
-This writes `ml_training_data.csv`, `ml_experiment_results.csv`, and
-`ml_experiment_predictions.csv`. The live app separately uses
-`ml_forecast.py`: after it has collected three route snapshots, it trains a
-small risk-series model locally and displays the resulting next-snapshot
-planning forecast with an explicit experimental label.
+The live app uses `ml_forecast.py`: after it has collected three route
+snapshots, it trains a small risk-series model locally and displays the
+resulting next-snapshot planning forecast with an explicit experimental
+label.
 
 ## Adaptive Procurement Orchestrator
 
@@ -163,8 +150,6 @@ hackathon model and are clearly excluded from its recommendations.
 | `route_scoring.py` | Shared per-route scoring used by both the primary route view and the Procurement Orchestrator |
 | `digital_twin.py` | Geospatial network rendering and transparent what-if scenario calculation |
 | `reserve_optimizer.py` | Transparent risk-derived strategic reserve drawdown simulation |
-| `prepare_ml_data.py` | Reproducible feature engineering and next-day training targets |
-| `evaluate_ml_experiment.py` | Chronological Logistic/Linear Regression experiment and baselines |
 | `ml_forecast.py` | Experimental live next-snapshot forecast after three route observations |
 | `requirements.txt` | Python dependencies |
 
