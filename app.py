@@ -11,6 +11,7 @@ import streamlit as st
 
 from digital_twin import create_twin_deck, run_scenario
 from live_gdelt import LiveDataError, load_event_data
+from ml_forecast import MINIMUM_LIVE_OBSERVATIONS, forecast_next_snapshot
 from reserve_optimizer import optimise_reserve_drawdown
 from risk_model import EVENT_WEIGHT, SENTIMENT_WEIGHT
 from route_scoring import score_route
@@ -57,7 +58,7 @@ def route_path_label(start: str, route: list, end: str) -> str:
 
 def main() -> None:
     st.title("Energy Supply Route Risk Monitor")
-    st.caption("Current GDELT signals for modeled energy-shipping chokepoints — not a forecast.")
+    st.caption("Current GDELT signals for modeled energy-shipping chokepoints, with an experimental next-snapshot forecast after sufficient route history is collected.")
 
     if "refresh_nonce" not in st.session_state:
         st.session_state.refresh_nonce = 0
@@ -116,6 +117,8 @@ def main() -> None:
     successful = result["successful"]
     route_score = result["score"]
     category = result["category"]
+    trend_history = record_live_observation(route_label, route_score, event_status["fetched_at"])
+    forecast = forecast_next_snapshot(trend_history)
 
     overview_tab, twin_tab, reserve_tab, orchestrator_tab, evidence_tab, trend_tab, method_tab = st.tabs(
         ["Overview", "Digital Twin", "Strategic Reserve", "Procurement Orchestrator", "Evidence", "Trend", "Method"]
@@ -123,7 +126,7 @@ def main() -> None:
 
     with overview_tab:
         st.subheader(route_label)
-        score_column, components_column, coverage_column = st.columns(3)
+        score_column, components_column, coverage_column, forecast_column = st.columns(4)
         score_column.metric("Route risk", f"{route_score:.2f} / 100")
         with components_column:
             st.metric("Usable chokepoints", f"{len(successful)} / {len(route)}")
@@ -133,7 +136,23 @@ def main() -> None:
             average_sentiment = sum(item["score"]["sentiment_score"] for item in successful) / len(successful)
             st.metric("Average components", f"{average_event:.1f} / {average_sentiment:.1f}")
             st.caption("Event / VADER")
+        with forecast_column:
+            if forecast is None:
+                st.metric("ML forecast", "Collecting history")
+                st.caption(f"Refresh {max(0, MINIMUM_LIVE_OBSERVATIONS - len(trend_history))} more time(s) for this route.")
+            else:
+                forecast_column.metric(
+                    "Experimental next snapshot",
+                    f"{forecast['predicted_score']:.2f} / 100",
+                    f"{forecast['change_from_current']:+.2f}",
+                )
+                forecast_column.caption(f"{forecast['predicted_category']} • {forecast['probability_up']:.0%} modeled probability of increase")
         risk_status(category)
+        if forecast is not None:
+            st.info(
+                "Experimental ML forecast: trained from the bundled historical daily risk series and calculated "
+                "from this route's last three live snapshots. It is a planning signal, not a validated operational forecast."
+            )
         if not result["is_complete"]:
             st.warning(
                 f"Partial coverage: this observed route score uses {len(successful)} of {len(route)} chokepoints. "
@@ -359,7 +378,6 @@ def main() -> None:
             st.dataframe(articles[["chokepoint", "seendate", "title", "domain", "sentiment", "sentiment_score", "url"]].sort_values("seendate", ascending=False), use_container_width=True, hide_index=True, column_config={"url": st.column_config.LinkColumn("Source link", display_text="Open article"), "sentiment_score": st.column_config.NumberColumn("VADER score", format="%.3f")})
 
     with trend_tab:
-        trend_history = record_live_observation(route_label, route_score, event_status["fetched_at"])
         st.subheader("Live route-risk observations")
         if len(trend_history) == 1:
             st.caption("First observation for this route in this browser session. Refresh live data to add a comparable observation.")
@@ -373,9 +391,13 @@ def main() -> None:
         st.subheader("Score method")
         st.write(f"Event risk: 60% Goldstein component + 40% AvgTone component. Composite: {EVENT_WEIGHT:.0%} Event risk + {SENTIMENT_WEIGHT:.0%} VADER sentiment risk. AvgTone is normalized across its full −100 to +100 range.")
         st.write("The Procurement Orchestrator tab reuses this exact scoring for every alternative origin — it is the same calculation applied to a different modeled route, not a separate model.")
-        with st.expander("Experimental ML result — not deployed"):
-            st.write("We tested whether historical patterns could predict next-day risk. They did not outperform simple baselines, so prediction is not used in this dashboard.")
-            st.dataframe(pd.DataFrame({"Experiment": ["Risk-direction classification", "Next-day risk regression"], "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"], "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"], "Live use": ["Not deployed", "Not deployed"]}), use_container_width=True, hide_index=True)
+        with st.expander("Experimental ML forecast"):
+            st.write(
+                "The dashboard deploys an experimental next-snapshot forecast after it has collected three "
+                "observations for the selected route. It uses the current score, prior score, one-step change, "
+                "and three-observation rolling mean. The current-risk score remains the primary decision signal."
+            )
+            st.dataframe(pd.DataFrame({"Experiment": ["Risk-direction classification", "Next-day risk regression"], "Simple baseline": ["Majority baseline: 55.56% accuracy", "Naive persistence: 1.32 MAE"], "Tested model": ["Logistic Regression: 46.15% accuracy", "Linear Regression: 2.39 MAE"], "Live use": ["Experimental probability of increase", "Experimental next-snapshot score"]}), use_container_width=True, hide_index=True)
 
 
 if __name__ == "__main__":

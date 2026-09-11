@@ -8,11 +8,10 @@ live GDELT event and news data. Built for Problem Statement 1
 
 - It calculates a **current** risk score (0–100) for a modeled shipping
   route, based on real-time geopolitical event data and news sentiment.
-- It does **not** predict future risk. A separate, honestly-documented
-  experiment tested whether historical patterns could predict next-day risk
-  direction/value; the tested models did not outperform simple baselines, so
-  no predictive model is deployed here (see "Method" tab in the app, or the
-  Experiment Record section below).
+- It deploys an **experimental next-snapshot forecast** after three live
+  observations have been collected for the selected route. It is displayed
+  separately from current risk and labeled as a planning signal, not a
+  validated operational forecast (see the Method tab).
 - Routes are modeled through a **fixed table of major maritime chokepoints**
   (Strait of Hormuz, Suez Canal, Strait of Malacca, Bab-el-Mandeb, Bosphorus,
   Strait of Gibraltar, Panama Canal, Cape of Good Hope), not real-time vessel
@@ -51,7 +50,7 @@ data — still HIGH, but a materially different, more accurate number. If any
 slides, pitch notes, or prior README versions still cite 57.82, update them
 to 52.49.
 
-## Experiment record: why there's no predictive model
+## Experiment record: experimental predictive model
 
 A historical daily dataset (~64 observations) was built with engineered
 features (article sentiment stats, event counts, Goldstein/tone averages,
@@ -64,11 +63,10 @@ simple baselines to predict next-day risk direction/value:
 | Next-day risk regression | Naive persistence: 1.32 MAE | Linear Regression: 2.39 MAE |
 
 Neither model beat its baseline — expected, given how little historical data
-was available relative to the number of features. Rather than deploy an
-unvalidated predictive claim, this result is shown transparently in the
-dashboard's Method tab, framed as: *"we tested whether historical patterns
-could predict next-day risk; they did not outperform simple baselines, so
-prediction is not used here."*
+was available relative to the number of features. The dashboard therefore
+labels its forecast as **experimental**: it appears only after three live
+route observations are available, remains separate from the current-risk
+score, and must not be treated as an operational or high-confidence forecast.
 
 ### Reproducing the experiment
 
@@ -83,8 +81,10 @@ python evaluate_ml_experiment.py
 ```
 
 This writes `ml_training_data.csv`, `ml_experiment_results.csv`, and
-`ml_experiment_predictions.csv`. These are experiment artifacts only:
-`app.py` does not import a model or show a prediction.
+`ml_experiment_predictions.csv`. The live app separately uses
+`ml_forecast.py`: after it has collected three route snapshots, it trains a
+small risk-series model locally and displays the resulting next-snapshot
+planning forecast with an explicit experimental label.
 
 ## Adaptive Procurement Orchestrator
 
@@ -165,6 +165,7 @@ hackathon model and are clearly excluded from its recommendations.
 | `reserve_optimizer.py` | Transparent risk-derived strategic reserve drawdown simulation |
 | `prepare_ml_data.py` | Reproducible feature engineering and next-day training targets |
 | `evaluate_ml_experiment.py` | Chronological Logistic/Linear Regression experiment and baselines |
+| `ml_forecast.py` | Experimental live next-snapshot forecast after three route observations |
 | `requirements.txt` | Python dependencies |
 
 ### Fix record: legacy Iran snapshot scoping
