@@ -70,6 +70,22 @@ dashboard's Method tab, framed as: *"we tested whether historical patterns
 could predict next-day risk; they did not outperform simple baselines, so
 prediction is not used here."*
 
+### Reproducing the experiment
+
+The experiment is now retained in the repository as offline, reproducible
+code. It uses a chronological 80/20 train/test split (never a random split),
+lag, day-over-day-change, and three-observation rolling-mean features from
+the daily event history. Run:
+
+```bash
+python prepare_ml_data.py
+python evaluate_ml_experiment.py
+```
+
+This writes `ml_training_data.csv`, `ml_experiment_results.csv`, and
+`ml_experiment_predictions.csv`. These are experiment artifacts only:
+`app.py` does not import a model or show a prediction.
+
 ## Adaptive Procurement Orchestrator
 
 The "Procurement Orchestrator" tab implements the brief's illustrative
@@ -147,6 +163,8 @@ hackathon model and are clearly excluded from its recommendations.
 | `route_scoring.py` | Shared per-route scoring used by both the primary route view and the Procurement Orchestrator |
 | `digital_twin.py` | Geospatial network rendering and transparent what-if scenario calculation |
 | `reserve_optimizer.py` | Transparent risk-derived strategic reserve drawdown simulation |
+| `prepare_ml_data.py` | Reproducible feature engineering and next-day training targets |
+| `evaluate_ml_experiment.py` | Chronological Logistic/Linear Regression experiment and baselines |
 | `requirements.txt` | Python dependencies |
 
 ### Fix record: legacy Iran snapshot scoping
